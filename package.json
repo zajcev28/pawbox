@@ -1,0 +1,19 @@
+{
+  "dependencies": {
+    "@supabase/auth-ui-react": "^0.4.7",
+    "@supabase/auth-ui-shared": "^0.1.8",
+    "@supabase/supabase-js": "^2.103.3",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.1.0",
+    "lucide-react": "^1.8.0",
+    "papaparse": "^5.5.3",
+    "react-dropzone": "^15.0.0",
+    "react-router-dom": "^7.14.1",
+    "tailwind-merge": "^3.5.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/papaparse": "^5.5.2",
+    "tailwindcss": "^4.2.2"
+  }
+}
