@@ -1,4 +1,4 @@
-import { Product } from '../types'
+import type { Product } from '../types'
 
 export const SEED_PRODUCTS: Omit<Product, 'id'>[] = [
   { nazwa:"Gourmet Revelations Adult Mus z łososiem Mokra Karma dla kota op. 2x57g", cena:10.9, bialko:"8,5%", tluszcz:"4,5%", wlokno:"0,05%", wilgotnosc:"81,0%", energia:null, sklad:"mięso i produkty pochodzenia zwierzęcego, ryby i produkty rybne (łosoś 4%), produkty pochodzenia roślinnego, składniki mineralne, cukry", species:"cat", food_type:"wet", is_grain_free:true, proteins:["salmon"], meat_percent:null },

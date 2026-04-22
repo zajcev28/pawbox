@@ -1,5 +1,5 @@
 import { Link, useNavigate } from 'react-router-dom'
-import { Session } from '@supabase/supabase-js'
+import { type Session } from '@supabase/supabase-js'
 import { supabase } from '../../lib/supabase'
 
 export default function Navbar({ session }: { session: Session | null }) {

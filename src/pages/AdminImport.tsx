@@ -50,6 +50,7 @@ export default function AdminImport() {
         species: detectSpecies(r['Nazwa']||''),
         food_type: detectType(r['Nazwa']||'', r['Wilgotność']||''),
         is_grain_free, proteins, meat_percent,
+        opis: r['Opis'] ? (r['Opis'] as string).substring(0, 2000) : null,
       }
     })
     let ok = 0

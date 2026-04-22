@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Session } from '@supabase/supabase-js'
+import { type Session } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
-import { Pet, PetProfile } from '../types'
+import type { Pet, PetProfile } from '../types'
 
 const EMPTY: PetProfile = { name:'', species:'cat', age_group:'adult', weight_kg:4, activity_level:'medium', health_conditions:[], allergies:[], food_type:'mixed' }
 

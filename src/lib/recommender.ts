@@ -1,4 +1,4 @@
-import { Product, PetProfile, ScoredProduct } from '../types'
+import type { Product, PetProfile, ScoredProduct } from '../types'
 
 export function calculateDailyCalories(
   weight: number,
@@ -30,6 +30,8 @@ function scoreProduct(product: Product, profile: PetProfile) {
   const warnings: string[] = []
   const nazwa = product.nazwa.toLowerCase()
   const sklad = (product.sklad || '').toLowerCase()
+  const opis = ((product as any).opis || '').toLowerCase()
+  const fullText = nazwa + ' ' + sklad + ' ' + opis
 
   // Wiek
   if (profile.age_group === 'kitten') {
@@ -79,7 +81,7 @@ function scoreProduct(product: Product, profile: PetProfile) {
 
   // Choroby
   if (profile.health_conditions.includes('kidney')) {
-    if (/renal|kidney|nerkow/.test(nazwa)) { score += 60; reasons.push('Formuła weterynaryjna dla nerek') }
+    if (/renal|kidney|nerkow|niewydolność nerek|przewlekła niewydolność/.test(fullText)) { score += 60; reasons.push('Formuła weterynaryjna dla nerek') }
     else {
       const p = parsePercent(product.bialko)
       if (p !== null && p < 22) { score += 40; reasons.push('Niskie białko — wspiera funkcję nerek') }
@@ -87,12 +89,12 @@ function scoreProduct(product: Product, profile: PetProfile) {
     }
   }
   if (profile.health_conditions.includes('sensitive_digestion')) {
-    if (/gastro|sensitive|digestive/.test(nazwa)) { score += 50; reasons.push('Formuła dla wrażliwego układu') }
+    if (/gastro|sensitive|digestive|wrażliwy układ|żołądek|jelita|trawien/.test(fullText)) { score += 50; reasons.push('Formuła dla wrażliwego układu') }
     if (product.proteins.length === 1) { score += 20; reasons.push('Monoproteinowa — mniej ryzyko nietolerancji') }
   }
   if (profile.health_conditions.includes('skin_coat')) {
     if (/omega|olej z łososia|olej lniany|biotin/.test(sklad)) { score += 30; reasons.push('Omega-3 wspomagają sierść i skórę') }
-    if (product.proteins.includes('salmon')) { score += 20; reasons.push('Łosoś bogaty w kwasy Omega-3') }
+    if (product.proteins.includes('salmon') || /łosoś|salmon|omega/.test(opis)) { score += 20; reasons.push('Łosoś bogaty w kwasy Omega-3') }
   }
   if (profile.health_conditions.includes('dental') && product.food_type === 'dry') {
     score += 15; reasons.push('Sucha karma mechanicznie czyści zęby')

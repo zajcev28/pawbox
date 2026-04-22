@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
-import { Product } from '../types'
+import type { Product } from '../types'
 import { SEED_PRODUCTS } from '../data/seed'
 
 export function useProducts() {
@@ -9,12 +9,29 @@ export function useProducts() {
 
   useEffect(() => {
     async function fetch() {
-      const { data, error } = await supabase
-        .from('products').select('*').order('cena', { ascending: true })
-      if (error || !data || data.length === 0) {
+      // Pobierz wszystkie produkty partiami (Supabase limit = 1000 na zapytanie)
+      let all: Product[] = []
+      let from = 0
+      const step = 1000
+
+      while (true) {
+        const { data, error } = await supabase
+          .from('products')
+          .select('*')
+          .order('cena', { ascending: true })
+          .range(from, from + step - 1)
+
+        if (error || !data) break
+        all = [...all, ...data]
+        if (data.length < step) break
+        from += step
+      }
+
+      if (all.length === 0) {
+        // Fallback: seed lokalny
         setProducts(SEED_PRODUCTS.map((p, i) => ({ ...p, id: `seed-${i}` })))
       } else {
-        setProducts(data)
+        setProducts(all)
       }
       setLoading(false)
     }

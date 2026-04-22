@@ -67,3 +67,6 @@ export interface SubscriptionItem {
   is_active: boolean
   product?: Product
 }
+
+// re-exports dla kompatybilności
+export type { Product, Pet, PetProfile, ScoredProduct, Subscription, SubscriptionItem }

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { PetProfile } from '../types'
+import type { PetProfile } from '../types'
 
 const HEALTH = [
   { value:'overweight', label:'⚖️ Nadwaga' },

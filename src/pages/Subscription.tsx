@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Session } from '@supabase/supabase-js'
+import { type Session } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
-import { Subscription } from '../types'
+import type { Subscription } from '../types'
 import { Link } from 'react-router-dom'
 
 export default function SubscriptionPage({ session }: { session: Session }) {

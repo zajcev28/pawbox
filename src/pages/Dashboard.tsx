@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Session } from '@supabase/supabase-js'
+import { type Session } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
-import { Pet, Subscription } from '../types'
+import type { Pet, Subscription } from '../types'
 
 export default function Dashboard({ session }: { session: Session }) {
   const [pets, setPets] = useState<Pet[]>([])
