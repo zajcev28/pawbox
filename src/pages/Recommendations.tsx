@@ -485,8 +485,8 @@ export default function Recommendations() {
                   <p style={{ textAlign: 'center', color: '#6b7280', padding: '2rem' }}>Brak wyników</p>
                 )}
 
-                {available.slice(0, 100).map((prod: any) => (
-                  <div key={prod.id}
+                {available.slice(0, 100).map((prod: any, idx: number) => (
+                  <div key={prod.id + "-" + idx}
                     style={{ borderRadius: '0.75rem', border: `1px solid ${expandedId === prod.id ? '#1b5c3a' : '#E8DFD0'}`, marginBottom: '0.5rem', overflow: 'hidden', transition: 'border-color 0.15s' }}>
 
                     {/* Wiersz karmy */}
