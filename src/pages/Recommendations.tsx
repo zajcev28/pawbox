@@ -176,7 +176,7 @@ function ProductDetails({ prod, dailyCal }: { prod: any; dailyCal: number }) {
             Opis producenta
           </p>
           <div style={{ fontSize: '0.8rem', color: '#374151', lineHeight: 1.7, background: 'white', padding: '0.6rem 0.75rem', borderRadius: '0.5rem', border: '1px solid #E8DFD0' }}>
-            {d.opis.split(/Wskazania|Zalety|Przeciwwskazania|Podawanie|Składniki/).map((section, i) => (
+            {d.opis.split(/Wskazania|Zalety|Przeciwwskazania|Podawanie|Składniki/).map((section: string, i: number) => (
               section.trim() ? <p key={i} style={{ margin: '0 0 0.5rem' }}>{section.trim()}</p> : null
             ))}
           </div>
@@ -192,7 +192,6 @@ export default function Recommendations() {
   const { products, loading } = useProducts()
 
   const [profile, setProfile] = useState<PetProfile | null>(null)
-  const [allRecs, setAllRecs] = useState<ScoredProduct[]>([])
   const [box, setBox] = useState<BoxItem[]>([])
   const [plan, setPlan] = useState<Plan>(PLANS[1])
   const [period, setPeriod] = useState(30)
@@ -217,7 +216,6 @@ export default function Recommendations() {
     )
     setDailyCal(kcal)
     const recs = getRecommendations(products, profile)
-    setAllRecs(recs)
     setBox(recs.slice(0, plan.maxFoods).map(p => buildBoxItem(p, kcal, period)))
   }, [profile, products])
 

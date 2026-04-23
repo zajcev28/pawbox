@@ -14,7 +14,10 @@ import Checkout from './pages/Checkout'
 import AdminImport from './pages/AdminImport'
 
 function Protected({ session, children }: { session: Session | null; children: React.ReactNode }) {
-  if (!session) return <Navigate to="/auth" replace />
+  if (!session) {
+    sessionStorage.setItem('intendedPath', window.location.pathname)
+    return <Navigate to="/auth" replace />
+  }
   return <>{children}</>
 }
 
