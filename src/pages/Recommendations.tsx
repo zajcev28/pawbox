@@ -193,6 +193,7 @@ export default function Recommendations() {
 
   const [profile, setProfile] = useState<PetProfile | null>(null)
   const [box, setBox] = useState<BoxItem[]>([])
+  const [fullBox, setFullBox] = useState<BoxItem[]>([])
   const [plan, setPlan] = useState<Plan>(PLANS[1])
   const [period, setPeriod] = useState(30)
   const [dailyCal, setDailyCal] = useState(0)
@@ -216,19 +217,31 @@ export default function Recommendations() {
     )
     setDailyCal(kcal)
     const recs = getRecommendations(products, profile)
-    setBox(recs.slice(0, plan.maxFoods).map(p => buildBoxItem(p, kcal, period)))
+    const full = recs.slice(0, 4).map(p => buildBoxItem(p, kcal, period))
+    setFullBox(full)
+    setBox(full.slice(0, plan.maxFoods))
   }, [profile, products])
 
   // ── Przelicz przy zmianie okresu ──────────────────────────────────────────
   useEffect(() => {
     if (!dailyCal) return
+    setFullBox(prev => prev.map(item => buildBoxItem(item.product, dailyCal, period)))
     setBox(prev => prev.map(item => buildBoxItem(item.product, dailyCal, period)))
   }, [period, dailyCal])
 
   // ── Zmiana planu ──────────────────────────────────────────────────────────
   const changePlan = (newPlan: Plan) => {
     setPlan(newPlan)
-    setBox(prev => prev.slice(0, newPlan.maxFoods))
+    // Przywróć karmy z fullBox do limitu nowego planu
+    setBox(prev => {
+      const current = prev.slice(0, newPlan.maxFoods)
+      // Jeśli mamy mniej karm niż pozwala plan — uzupełnij z fullBox
+      const currentIds = new Set(current.map(b => b.product.id))
+      const extra = fullBox
+        .filter(b => !currentIds.has(b.product.id))
+        .slice(0, newPlan.maxFoods - current.length)
+      return [...current, ...extra]
+    })
   }
 
   // ── Akcje ────────────────────────────────────────────────────────────────
