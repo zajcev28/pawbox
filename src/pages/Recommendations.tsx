@@ -200,6 +200,7 @@ export default function Recommendations() {
 
   // modal
   const [swapIndex, setSwapIndex] = useState<number | null>(null)
+  const [expandedBoxId, setExpandedBoxId] = useState<string | null>(null)
   const [swapSearch, setSwapSearch] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
@@ -342,8 +343,10 @@ export default function Recommendations() {
               Twój zestaw ({box.length}/{plan.maxFoods})
             </h2>
 
-            {box.map((item, idx) => (
-              <div key={item.product.id} style={{ ...cardStyle, marginBottom: '0.75rem', padding: '1rem' }}>
+            {box.map((item, idx) => {
+              return (
+              <div key={item.product.id} style={{ marginBottom: '0.75rem' }}>
+              <div style={{ ...cardStyle, padding: '1rem' }}>
                 <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start' }}>
                   <div style={{ flex: 1 }}>
                     <div style={{ display: 'flex', gap: '0.35rem', marginBottom: '0.4rem', flexWrap: 'wrap' }}>
@@ -375,6 +378,10 @@ export default function Recommendations() {
                     ))}
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', flexShrink: 0 }}>
+                    <button onClick={() => setExpandedBoxId(expandedBoxId === item.product.id ? null : item.product.id)}
+                      style={{ padding: '0.4rem 0.65rem', borderRadius: '0.5rem', border: '1px solid #E8DFD0', background: expandedBoxId === item.product.id ? '#f0f7f3' : 'white', cursor: 'pointer', fontSize: '0.75rem' }}>
+                      {expandedBoxId === item.product.id ? '▲ Ukryj' : '▼ Szczegóły'}
+                    </button>
                     <button onClick={() => { setSwapIndex(idx); setSwapSearch(''); setExpandedId(null) }}
                       style={{ padding: '0.4rem 0.65rem', borderRadius: '0.5rem', border: '1px solid #E8DFD0', background: 'white', cursor: 'pointer', fontSize: '0.75rem' }}>
                       🔄 Zamień
@@ -386,7 +393,13 @@ export default function Recommendations() {
                   </div>
                 </div>
               </div>
-            ))}
+                {expandedBoxId === item.product.id && (
+                  <div style={{ padding: '0.75rem', background: 'white', borderRadius: '0 0 1rem 1rem', border: '1px solid #E8DFD0', borderTop: 'none', marginTop: '-1px' }}>
+                    <ProductDetails prod={item.product} dailyCal={dailyCal} />
+                  </div>
+                )}
+              </div>
+            )})}
 
             {box.length < plan.maxFoods && (
               <button onClick={() => { setSwapIndex(-1); setSwapSearch(''); setExpandedId(null) }}
