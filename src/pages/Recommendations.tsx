@@ -209,7 +209,7 @@ export default function Recommendations() {
   const [period, setPeriod] = useState(30)
   const [dailyCal, setDailyCal] = useState(0)
 
-  const { getRecommendations: getAIRecs, loading: aiLoading } = useAIRecommendations()
+  const { getRecommendations: getAIRecs } = useAIRecommendations()
 
   // modal
   const [swapIndex, setSwapIndex] = useState<number | null>(null)
