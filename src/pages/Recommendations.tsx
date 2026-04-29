@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { PetProfile, ScoredProduct } from '../types'
 import { getRecommendations, calculateDailyCalories } from '../lib/recommender'
+import { useAIRecommendations } from '../hooks/useAIRecommendations'
 import { useProducts } from '../hooks/useProducts'
 import { supabase } from '../lib/supabase'
 
@@ -51,10 +52,17 @@ const PROTEIN_LABELS: Record<string, string> = {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function parseKcal(energia: string | null, foodType: 'dry' | 'wet'): number {
   if (energia) {
+    const s = energia.toLowerCase()
     const m = energia.match(/(\d+)/)
     if (m) {
       const v = parseInt(m[1])
-      return v > 1000 ? Math.round(v / 10) : v
+      // Jeśli wartość to kcal/kg — przelicz na kcal/100g
+      if (s.includes('/kg') || s.includes('kg')) return Math.round(v / 10)
+      // Jeśli wartość to kcal/100g — użyj bezpośrednio
+      if (s.includes('100g') || s.includes('100 g')) return v
+      // Heurystyka: >800 to prawie na pewno kcal/kg
+      if (v > 800) return Math.round(v / 10)
+      return v
     }
   }
   return foodType === 'dry' ? 350 : 85
@@ -62,7 +70,10 @@ function parseKcal(energia: string | null, foodType: 'dry' | 'wet'): number {
 
 function buildBoxItem(product: ScoredProduct, dailyCal: number, days: number): BoxItem {
   const kcalPer100g = parseKcal(product.energia, product.food_type)
-  const grams_per_day = Math.round((dailyCal / kcalPer100g) * 100)
+  const rawGrams = Math.round((dailyCal / kcalPer100g) * 100)
+  // Sanity check: kot max ~400g/dzień, pies max ~1500g/dzień
+  const maxGrams = 1500
+  const grams_per_day = Math.min(rawGrams, maxGrams)
   const grams_total = grams_per_day * days
   const packGrams = product.food_type === 'wet' ? 400 : 2000
   const bags = Math.ceil(grams_total / packGrams)
@@ -198,6 +209,8 @@ export default function Recommendations() {
   const [period, setPeriod] = useState(30)
   const [dailyCal, setDailyCal] = useState(0)
 
+  const { getRecommendations: getAIRecs, loading: aiLoading } = useAIRecommendations()
+
   // modal
   const [swapIndex, setSwapIndex] = useState<number | null>(null)
   const [expandedBoxId, setExpandedBoxId] = useState<string | null>(null)
@@ -210,17 +223,40 @@ export default function Recommendations() {
     if (s) setProfile(JSON.parse(s))
   }, [])
 
-  // ── Rekomendacje ──────────────────────────────────────────────────────────
+  // ── Rekomendacje (AI + fallback JS) ───────────────────────────────────────
   useEffect(() => {
     if (!profile || products.length === 0) return
-    const kcal = calculateDailyCalories(
-      profile.weight_kg, profile.age_group, profile.activity_level, profile.species
-    )
-    setDailyCal(kcal)
-    const recs = getRecommendations(products, profile)
-    const full = recs.slice(0, 4).map(p => buildBoxItem(p, kcal, period))
-    setFullBox(full)
-    setBox(full.slice(0, plan.maxFoods))
+
+    const fallbackJS = (kcal: number) => {
+      const recs = getRecommendations(products, profile)
+      const full = recs.slice(0, 4).map(p => buildBoxItem(p, kcal, period))
+      setFullBox(full)
+      setBox(full.slice(0, plan.maxFoods))
+    }
+
+    const loadAI = async () => {
+      // Pre-filtruj JS żeby wysłać do AI tylko sensowne produkty
+      const preFiltered = getRecommendations(products, profile).slice(0, 30)
+      const result = await getAIRecs(profile, preFiltered)
+
+      if (result) {
+        setDailyCal(result.dailyCalories)
+        const full = result.products.slice(0, 4).map(p =>
+          buildBoxItem(p, result.dailyCalories, period)
+        )
+        setFullBox(full)
+        setBox(full.slice(0, plan.maxFoods))
+      } else {
+        // Fallback do algorytmu JS
+        const kcal = calculateDailyCalories(
+          profile.weight_kg, profile.age_group, profile.activity_level, profile.species
+        )
+        setDailyCal(kcal)
+        fallbackJS(kcal)
+      }
+    }
+
+    loadAI()
   }, [profile, products])
 
   // ── Przelicz przy zmianie okresu ──────────────────────────────────────────
