@@ -19,7 +19,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   // Przygotuj uproszczoną listę produktów dla AI (max 30 pozycji)
-  const productList = products.slice(0, 30).map((p: any, i: number) => ({
+  const productList = products.slice(0, 15).map((p: any, i: number) => ({
     idx: i,
     nazwa: p.nazwa?.substring(0, 80),
     bialko: p.bialko,
@@ -87,8 +87,9 @@ Odpowiedz TYLKO w formacie JSON (bez markdown, bez \`\`\`):
 
     if (!groqRes.ok) {
       const err = await groqRes.text()
-      console.error('Groq error:', err)
-      return res.status(502).json({ error: 'Groq API error', details: err })
+      console.error('Groq error status:', groqRes.status)
+      console.error('Groq error body:', err)
+      return res.status(502).json({ error: 'Groq API error', status: groqRes.status, details: err })
     }
 
     const data = await groqRes.json()
