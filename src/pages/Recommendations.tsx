@@ -81,6 +81,14 @@ function buildBoxItem(product: ScoredProduct, dailyCal: number, days: number): B
   return { product, grams_per_day, grams_total, bags, monthly_cost }
 }
 
+function rebuildBoxItemWithGrams(item: BoxItem, newGramsPerDay: number, days: number): BoxItem {
+  const grams_total = newGramsPerDay * days
+  const packGrams = item.product.food_type === 'wet' ? 400 : 2000
+  const bags = Math.ceil(grams_total / packGrams)
+  const monthly_cost = Math.round(bags * (item.product.cena || 10))
+  return { ...item, grams_per_day: newGramsPerDay, grams_total, bags, monthly_cost }
+}
+
 // ─── Komponent szczegółów (lazy load z Supabase) ──────────────────────────────
 function ProductDetails({ prod, dailyCal }: { prod: any; dailyCal: number }) {
   const [details, setDetails] = useState<any>(null)
