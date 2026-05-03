@@ -214,6 +214,7 @@ export default function Recommendations() {
   // modal
   const [swapIndex, setSwapIndex] = useState<number | null>(null)
   const [expandedBoxId, setExpandedBoxId] = useState<string | null>(null)
+  const [editingGrams, setEditingGrams]   = useState<Record<string, number>>({})
   const [swapSearch, setSwapSearch] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
@@ -285,9 +286,13 @@ export default function Recommendations() {
   const removeItem = (idx: number) => setBox(prev => prev.filter((_, i) => i !== idx))
 
   const swapItem = (idx: number, newProduct: ScoredProduct) => {
-    setBox(prev => prev.map((item, i) =>
-      i === idx ? buildBoxItem(newProduct, dailyCal, period) : item
-    ))
+    setBox(prev => {
+      const oldId = prev[idx]?.product.id
+      if (oldId) setEditingGrams(eg => { const n = {...eg}; delete n[oldId]; return n })
+      return prev.map((item, i) =>
+        i === idx ? buildBoxItem(newProduct, dailyCal, period) : item
+      )
+    })
     setSwapIndex(null)
     setSwapSearch('')
     setExpandedId(null)
@@ -412,6 +417,32 @@ export default function Recommendations() {
                     {(item.product.reasons || []).slice(0, 2).map((r, i) => (
                       <div key={i} style={{ fontSize: '0.75rem', color: '#1b5c3a' }}>✓ {r}</div>
                     ))}
+
+                    {/* Suwak ilości */}
+                    <div style={{ marginTop: '0.5rem', paddingTop: '0.5rem', borderTop: '1px dashed #E8DFD0' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#6b7280', marginBottom: '0.25rem' }}>
+                        <span>Porcja dzienna:</span>
+                        <strong style={{ color: '#1b5c3a' }}>{editingGrams[item.product.id] ?? item.grams_per_day}g</strong>
+                      </div>
+                      <input type="range"
+                        min={item.product.food_type === 'dry' ? 10 : 30}
+                        max={item.product.food_type === 'dry' ? 400 : 800}
+                        step={5}
+                        value={editingGrams[item.product.id] ?? item.grams_per_day}
+                        onChange={e => {
+                          const newG = parseInt(e.target.value)
+                          setEditingGrams(prev => ({ ...prev, [item.product.id]: newG }))
+                          setBox(prev => prev.map((b, i) =>
+                            i === idx ? rebuildBoxItemWithGrams(b, newG, period) : b
+                          ))
+                        }}
+                        style={{ width: '100%', accentColor: '#1b5c3a' }}
+                      />
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.6rem', color: '#9ca3af' }}>
+                        <span>{item.product.food_type === 'dry' ? '10g' : '30g'}</span>
+                        <span>{item.product.food_type === 'dry' ? '400g' : '800g'}</span>
+                      </div>
+                    </div>
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', flexShrink: 0 }}>
                     <button onClick={() => setExpandedBoxId(expandedBoxId === item.product.id ? null : item.product.id)}
