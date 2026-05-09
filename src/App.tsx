@@ -45,6 +45,7 @@ export default function App() {
           <Route path="/pets" element={<Protected session={session}><Pets session={session!} /></Protected>} />
           <Route path="/subscription" element={<Protected session={session}><Subscription session={session!} /></Protected>} />
           <Route path="/checkout" element={<Protected session={session}><Checkout session={session!} /></Protected>} />
+          <Route path="/settings" element={<Protected session={session}><Settings session={session!} /></Protected>} />
         </Routes>
       </main>
       <Footer />
