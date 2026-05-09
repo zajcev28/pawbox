@@ -17,6 +17,7 @@ export default function AuthPage({ session }: { session: Session | null }) {
   const [password, setPass]   = useState('')
   const [error, setError]     = useState('')
   const [loading, setLoading] = useState(false)
+  const [showPass, setShowPass] = useState(false)
 
   const handle = async () => {
     setError(''); setLoading(true)
@@ -74,9 +75,20 @@ export default function AuthPage({ session }: { session: Session | null }) {
               <label style={{ display:'block', fontSize:'0.875rem', marginBottom:'0.4rem', color:'#374151' }}>
                 Hasło
               </label>
-              <input className="input" type="password" placeholder="minimum 6 znaków"
-                value={password} onChange={e => setPass(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handle()} />
+              <div style={{ position:'relative' }}>
+                <input className="input" type={showPass ? 'text' : 'password'}
+                  placeholder="minimum 6 znaków"
+                  value={password} onChange={e => setPass(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handle()}
+                  style={{ paddingRight:'2.75rem' }} />
+                <button
+                  type="button"
+                  onClick={() => setShowPass(p => !p)}
+                  style={{ position:'absolute', right:'0.75rem', top:'50%', transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', color:'#6b7280', fontSize:'1.1rem', padding:0, lineHeight:1 }}
+                  title={showPass ? 'Ukryj hasło' : 'Pokaż hasło'}>
+                  {showPass ? '🙈' : '👁️'}
+                </button>
+              </div>
             </div>
 
             {error && (
