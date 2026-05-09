@@ -70,6 +70,7 @@ export default function Quiz() {
   }
 
   const handleFinish = () => {
+    console.log('session przy kliknięciu:', session?.user?.email || 'BRAK SESJI')
     sessionStorage.setItem('quizProfile', JSON.stringify(p))
     if (session) {
       navigate('/recommendations')
@@ -264,7 +265,7 @@ export default function Quiz() {
                     style={{paddingRight:'2.75rem'}} />
                   <button type="button" onClick={() => setShowPass(v => !v)}
                     style={{position:'absolute', right:'0.75rem', top:'50%', transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', color:'#6b7280', fontSize:'1.1rem', padding:0}}>
-                    {showPass ? '🙈' : '👁️'}
+                    {showPass ? '👁️' : '🙈'}
                   </button>
                 </div>
               </div>

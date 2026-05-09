@@ -86,7 +86,7 @@ export default function AuthPage({ session }: { session: Session | null }) {
                   onClick={() => setShowPass(p => !p)}
                   style={{ position:'absolute', right:'0.75rem', top:'50%', transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', color:'#6b7280', fontSize:'1.1rem', padding:0, lineHeight:1 }}
                   title={showPass ? 'Ukryj hasło' : 'Pokaż hasło'}>
-                  {showPass ? '🙈' : '👁️'}
+                  {showPass ? '👁️' : '🙈'}
                 </button>
               </div>
             </div>
