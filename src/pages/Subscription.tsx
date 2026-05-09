@@ -17,6 +17,47 @@ export default function SubscriptionPage({ session }: { session: Session }) {
     setSub(s => s ? {...s, status:'paused'} : s)
   }
 
+  const updateFrequency = async (days: number) => {
+    if (!sub) return
+    setSub(s => s ? {...s, delivery_frequency_days: days} : s)
+
+    // Przelicz next_delivery_date tylko jeśli jest w przeszłości lub dziś
+    const today = new Date()
+    today.setHours(0,0,0,0)
+    const nextDate = sub.next_delivery_date ? new Date(sub.next_delivery_date) : null
+
+    let newNextDate = sub.next_delivery_date
+
+    if (!nextDate || nextDate <= today) {
+      // Data minęła — ustaw od dziś + nowa częstotliwość
+      const d = new Date()
+      d.setDate(d.getDate() + days)
+      newNextDate = d.toISOString().split('T')[0]
+    }
+    // Jeśli data jest w przyszłości — nie ruszamy jej, tylko zmieniamy częstotliwość
+
+    await supabase.from('subscriptions').update({
+      delivery_frequency_days: days,
+      next_delivery_date: newNextDate,
+    }).eq('id', sub.id)
+
+    setSub(s => s ? {...s, delivery_frequency_days: days, next_delivery_date: newNextDate} : s)
+  }
+
+  // Oblicz kolejne 3 daty dostaw
+  const getNextDates = () => {
+    if (!sub?.next_delivery_date) return []
+    const dates = []
+    const freq = sub.delivery_frequency_days || 30
+    let d = new Date(sub.next_delivery_date)
+    for (let i = 0; i < 3; i++) {
+      dates.push(d.toLocaleDateString('pl-PL', { day:'numeric', month:'long', year:'numeric' }))
+      d = new Date(d)
+      d.setDate(d.getDate() + freq)
+    }
+    return dates
+  }
+
   return (
     <div style={{minHeight:'100vh', background:'#FAF6EF', padding:'3rem 1rem'}}>
       <div style={{maxWidth:700, margin:'0 auto'}}>
@@ -37,14 +78,23 @@ export default function SubscriptionPage({ session }: { session: Session }) {
                 Częstotliwość dostaw: co <strong>{sub.delivery_frequency_days}</strong> dni
               </label>
               <input type="range" min={7} max={60} value={sub.delivery_frequency_days}
-                onChange={async e => {
-                  const v = parseInt(e.target.value)
-                  setSub(s => s ? {...s, delivery_frequency_days:v} : s)
-                  await supabase.from('subscriptions').update({delivery_frequency_days:v}).eq('id',sub.id)
-                }}
+                onChange={e => updateFrequency(parseInt(e.target.value))}
                 style={{width:'100%', accentColor:'#1b5c3a'}} />
               <div style={{display:'flex', justifyContent:'space-between', fontSize:'0.75rem', color:'#9ca3af'}}>
                 <span>7 dni</span><span>60 dni</span>
+              </div>
+              {/* Kolejne daty dostaw */}
+              <div style={{marginTop:'0.75rem', padding:'0.75rem', background:'#f0f7f3', borderRadius:'0.75rem'}}>
+                <p style={{fontSize:'0.75rem', fontWeight:600, color:'#1b5c3a', margin:'0 0 0.4rem'}}>
+                  Planowane dostawy:
+                </p>
+                {getNextDates().map((d, i) => (
+                  <div key={i} style={{fontSize:'0.8rem', color:'#374151', padding:'0.2rem 0', display:'flex', alignItems:'center', gap:'0.5rem'}}>
+                    <span style={{color:'#1b5c3a'}}>{'📦'}</span>
+                    <span>{i === 0 ? <strong>{d}</strong> : d}</span>
+                    {i === 0 && <span style={{fontSize:'0.7rem', background:'#1b5c3a', color:'white', padding:'1px 6px', borderRadius:10}}>następna</span>}
+                  </div>
+                ))}
               </div>
             </div>
             {sub.status==='active' && (
