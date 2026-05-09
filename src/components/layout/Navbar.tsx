@@ -16,6 +16,7 @@ export default function Navbar({ session }: { session: Session | null }) {
             <>
               <Link to="/dashboard" style={{fontSize:'0.875rem', color:'#4b5563', textDecoration:'none'}}>Panel</Link>
               <Link to="/pets"     style={{fontSize:'0.875rem', color:'#4b5563', textDecoration:'none'}}>Pupile</Link>
+              <Link to='/settings' style={{fontSize:'0.875rem', color:'#6b7280', textDecoration:'none'}}>⚙️</Link>
               <button onClick={logout} style={{fontSize:'0.875rem', color:'#9ca3af', background:'none', border:'none', cursor:'pointer'}}>Wyloguj</button>
             </>
           ) : (

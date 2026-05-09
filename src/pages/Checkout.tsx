@@ -87,6 +87,25 @@ export default function Checkout({ session }: { session: Session }) {
       sessionStorage.removeItem('selectedProducts')
       sessionStorage.removeItem('boxItems')
 
+      // Wyślij mail potwierdzający
+      try {
+        await fetch('/api/send-email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'order_confirmation',
+            to:   session.user.email,
+            data: {
+              orderId:      sub?.id || 'unknown',
+              petName:      profile.name || 'pupil',
+              planName:     plan,
+              nextDelivery: nextDate.toISOString().split('T')[0],
+              itemCount:    products.length,
+            },
+          }),
+        })
+      } catch (e) { console.error('Mail error:', e) }
+
       setDone(true)
       setTimeout(() => navigate('/dashboard'), 3000)
 

@@ -11,6 +11,7 @@ import Dashboard from './pages/Dashboard'
 import Pets from './pages/Pets'
 import Subscription from './pages/Subscription'
 import Checkout from './pages/Checkout'
+import Settings from './pages/Settings'
 import AdminImport from './pages/AdminImport'
 
 function Protected({ session, children }: { session: Session | null; children: React.ReactNode }) {
