@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { type Session } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
 import { useNavigate } from 'react-router-dom'
@@ -14,6 +14,24 @@ export default function Checkout({ session }: { session: Session }) {
   const [saving,  setSaving]  = useState(false)
   const [error,   setError]   = useState('')
 
+  // Auto-uzupełnij adres z profilu
+  useEffect(() => {
+    supabase
+      .from('user_profiles')
+      .select('street, city, postal_code')
+      .eq('id', session.user.id)
+      .single()
+      .then(({ data }) => {
+        if (data?.street) {
+          setAddress({
+            street: data.street || '',
+            city:   data.city || '',
+            postal: data.postal_code || '',
+          })
+        }
+      })
+  }, [session.user.id])
+
   const submit = async () => {
     if (!address.street || !address.city || !address.postal) {
       setError('Uzupełnij wszystkie pola adresu')
@@ -23,18 +41,21 @@ export default function Checkout({ session }: { session: Session }) {
     setError('')
 
     try {
-      // 1. Zapisz adres do profilu użytkownika
-      await supabase.from('user_profiles').upsert({
-        id:          session.user.id,
-        street:      address.street,
-        city:        address.city,
-        postal_code: address.postal,
-      })
+      // 1. Zapisz adres
+      const { error: profileError } = await supabase
+        .from('user_profiles')
+        .upsert({
+          id:          session.user.id,
+          street:      address.street,
+          city:        address.city,
+          postal_code: address.postal,
+        })
+      if (profileError) console.error('Profile error:', profileError)
 
-      // 2. Zapisz pupila jeśli mamy profil z quizu
+      // 2. Zapisz pupila
       let petId: string | null = null
       if (profile.name && profile.species) {
-        const { data: pet } = await supabase
+        const { data: pet, error: petError } = await supabase
           .from('pets')
           .insert({
             user_id:           session.user.id,
@@ -47,47 +68,61 @@ export default function Checkout({ session }: { session: Session }) {
             allergies:         profile.allergies     || [],
             food_type:         profile.food_type     || 'mixed',
           })
-          .select()
+          .select('id')
           .single()
-        petId = pet?.id || null
+
+        if (petError) {
+          console.error('Pet error:', petError)
+        } else {
+          petId = pet?.id || null
+        }
       }
 
       // 3. Utwórz subskrypcję
       const nextDate = new Date()
       nextDate.setDate(nextDate.getDate() + 30)
+      const nextDeliveryDate = nextDate.toISOString().split('T')[0]
 
-      const { data: sub } = await supabase
+      const { data: sub, error: subError } = await supabase
         .from('subscriptions')
         .insert({
-          user_id:                session.user.id,
-          pet_id:                 petId,
-          plan_type:              plan,
-          status:                 'active',
+          user_id:                 session.user.id,
+          pet_id:                  petId,
+          plan_type:               plan,
+          status:                  'active',
           delivery_frequency_days: 30,
-          next_delivery_date:     nextDate.toISOString().split('T')[0],
+          next_delivery_date:      nextDeliveryDate,
         })
-        .select()
+        .select('id')
         .single()
 
-      // 4. Zapisz pozycje subskrypcji
-      if (sub && products.length > 0) {
-        await supabase.from('subscription_items').insert(
-          products.map((id: string) => ({
-            subscription_id: sub.id,
-            product_id:      id.startsWith('seed-') ? null : id,
-            quantity_g:      500,
-            is_active:       true,
-          }))
-        )
+      if (subError || !sub) {
+        console.error('Subscription error:', subError)
+        setError('Błąd zapisu subskrypcji: ' + (subError?.message || 'nieznany błąd'))
+        setSaving(false)
+        return
       }
 
-      // 5. Wyczyść sessionStorage
-      sessionStorage.removeItem('quizProfile')
-      sessionStorage.removeItem('selectedPlan')
-      sessionStorage.removeItem('selectedProducts')
-      sessionStorage.removeItem('boxItems')
+      console.log('Subskrypcja utworzona:', sub.id)
 
-      // Wyślij mail potwierdzający
+      // 4. Zapisz produkty w subskrypcji
+      const validProducts = products.filter((id: string) => !id.startsWith('seed-'))
+
+      if (validProducts.length > 0) {
+        const { error: itemsError } = await supabase
+          .from('subscription_items')
+          .insert(
+            validProducts.map((id: string) => ({
+              subscription_id: sub.id,
+              product_id:      id,
+              quantity_g:      500,
+              is_active:       true,
+            }))
+          )
+        if (itemsError) console.error('Items error:', itemsError)
+      }
+
+      // 5. Wyślij mail potwierdzający
       try {
         await fetch('/api/send-email', {
           method: 'POST',
@@ -96,22 +131,30 @@ export default function Checkout({ session }: { session: Session }) {
             type: 'order_confirmation',
             to:   session.user.email,
             data: {
-              orderId:      sub?.id || 'unknown',
+              orderId:      sub.id,
               petName:      profile.name || 'pupil',
               planName:     plan,
-              nextDelivery: nextDate.toISOString().split('T')[0],
+              nextDelivery: nextDeliveryDate,
               itemCount:    products.length,
             },
           }),
         })
-      } catch (e) { console.error('Mail error:', e) }
+      } catch (e) {
+        console.error('Mail error:', e)
+      }
+
+      // 6. Wyczyść sessionStorage
+      sessionStorage.removeItem('quizProfile')
+      sessionStorage.removeItem('selectedPlan')
+      sessionStorage.removeItem('selectedProducts')
+      sessionStorage.removeItem('boxItems')
 
       setDone(true)
       setTimeout(() => navigate('/dashboard'), 3000)
 
-    } catch (e) {
-      setError('Coś poszło nie tak. Spróbuj ponownie.')
-      console.error(e)
+    } catch (e: any) {
+      console.error('Checkout error:', e)
+      setError('Coś poszło nie tak: ' + e.message)
     } finally {
       setSaving(false)
     }
@@ -149,54 +192,45 @@ export default function Checkout({ session }: { session: Session }) {
             <div>
               <div style={{ fontWeight:600 }}>{profile.name}</div>
               <div style={{ fontSize:'0.875rem', color:'#6b7280' }}>
-                {profile.weight_kg} kg · plan <strong style={{ textTransform:'capitalize' }}>{plan}</strong>
+                {profile.weight_kg} kg · plan{' '}
+                <strong style={{ textTransform:'capitalize', color:'#1b5c3a' }}>{plan}</strong>
               </div>
             </div>
           </div>
         )}
 
-        {/* Adres dostawy */}
+        {/* Adres */}
         <div style={{ background:'white', borderRadius:'1rem', border:'1px solid #E8DFD0', padding:'1.5rem', marginBottom:'1.5rem' }}>
           <h3 style={{ fontFamily:'Lora,Georgia,serif', fontSize:'1.1rem', margin:'0 0 1rem' }}>
             📦 Adres dostawy
           </h3>
           <div style={{ display:'flex', flexDirection:'column', gap:'0.75rem' }}>
             <div>
-              <label style={{ display:'block', fontSize:'0.875rem', marginBottom:'0.3rem', color:'#374151' }}>
-                Ulica i numer
-              </label>
+              <label style={{ display:'block', fontSize:'0.875rem', marginBottom:'0.3rem', color:'#374151' }}>Ulica i numer</label>
               <input className="input" placeholder="np. Marszałkowska 1/2"
-                value={address.street}
-                onChange={e => setAddress(a => ({ ...a, street: e.target.value }))} />
+                value={address.street} onChange={e => setAddress(a => ({ ...a, street: e.target.value }))} />
             </div>
             <div style={{ display:'grid', gridTemplateColumns:'140px 1fr', gap:'0.75rem' }}>
               <div>
-                <label style={{ display:'block', fontSize:'0.875rem', marginBottom:'0.3rem', color:'#374151' }}>
-                  Kod pocztowy
-                </label>
+                <label style={{ display:'block', fontSize:'0.875rem', marginBottom:'0.3rem', color:'#374151' }}>Kod pocztowy</label>
                 <input className="input" placeholder="00-000"
-                  value={address.postal}
-                  onChange={e => setAddress(a => ({ ...a, postal: e.target.value }))} />
+                  value={address.postal} onChange={e => setAddress(a => ({ ...a, postal: e.target.value }))} />
               </div>
               <div>
-                <label style={{ display:'block', fontSize:'0.875rem', marginBottom:'0.3rem', color:'#374151' }}>
-                  Miasto
-                </label>
+                <label style={{ display:'block', fontSize:'0.875rem', marginBottom:'0.3rem', color:'#374151' }}>Miasto</label>
                 <input className="input" placeholder="Warszawa"
-                  value={address.city}
-                  onChange={e => setAddress(a => ({ ...a, city: e.target.value }))} />
+                  value={address.city} onChange={e => setAddress(a => ({ ...a, city: e.target.value }))} />
               </div>
             </div>
           </div>
         </div>
 
-        {/* Wybrane karmy */}
-        <div style={{ background:'white', borderRadius:'1rem', border:'1px solid #E8DFD0', padding:'1.5rem', marginBottom:'1.5rem' }}>
-          <h3 style={{ fontFamily:'Lora,Georgia,serif', fontSize:'1.1rem', margin:'0 0 0.75rem' }}>
-            🐾 Twój zestaw
-          </h3>
+        {/* Zestaw */}
+        <div style={{ background:'white', borderRadius:'1rem', border:'1px solid #E8DFD0', padding:'1.25rem', marginBottom:'1.5rem' }}>
+          <h3 style={{ fontFamily:'Lora,Georgia,serif', fontSize:'1.1rem', margin:'0 0 0.5rem' }}>🐾 Twój zestaw</h3>
           <div style={{ fontSize:'0.875rem', color:'#6b7280' }}>
-            {products.length} karm · dostawa co 30 dni · plan <strong style={{ textTransform:'capitalize', color:'#1b5c3a' }}>{plan}</strong>
+            {products.length} karm · dostawa co 30 dni ·{' '}
+            plan <strong style={{ textTransform:'capitalize', color:'#1b5c3a' }}>{plan}</strong>
           </div>
         </div>
 
