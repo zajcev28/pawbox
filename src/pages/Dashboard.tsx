@@ -10,7 +10,7 @@ export default function Dashboard({ session }: { session: Session }) {
 
   useEffect(() => {
     supabase.from('pets').select('*').eq('user_id', session.user.id).then(r => r.data && setPets(r.data))
-    supabase.from('subscriptions').select('*').eq('user_id', session.user.id).eq('status','active').maybeSingle().then(r => r.data && setSub(r.data))
+    supabase.from('subscriptions').select('*').eq('user_id', session.user.id).eq('status','active').order('created_at', {ascending: false}).limit(1).maybeSingle().then(r => r.data && setSub(r.data))
   }, [session])
 
   return (

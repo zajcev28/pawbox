@@ -78,6 +78,36 @@ export default function Checkout({ session }: { session: Session }) {
         }
       }
 
+      // 3. Sprawdź czy user ma już aktywną subskrypcję
+      const { data: existing } = await supabase
+        .from('subscriptions')
+        .select('id')
+        .eq('user_id', session.user.id)
+        .eq('status', 'active')
+        .limit(1)
+        .maybeSingle()
+
+      if (existing) {
+        // Aktualizuj istniejącą zamiast tworzyć nową
+        console.log('Aktualizuję istniejącą subskrypcję:', existing.id)
+        await supabase.from('subscriptions').update({ plan_type: plan }).eq('id', existing.id)
+        // Usuń stare karmy i dodaj nowe
+        await supabase.from('subscription_items').delete().eq('subscription_id', existing.id)
+        if (validProducts.length > 0) {
+          await supabase.from('subscription_items').insert(
+            validProducts.map((id: string) => ({ subscription_id: existing.id, product_id: id, quantity_g: 500, is_active: true }))
+          )
+        }
+        sessionStorage.removeItem('quizProfile')
+        sessionStorage.removeItem('selectedPlan')
+        sessionStorage.removeItem('selectedProducts')
+        sessionStorage.removeItem('boxItems')
+        setDone(true)
+        setTimeout(() => navigate('/dashboard'), 3000)
+        setSaving(false)
+        return
+      }
+
       // 3. Utwórz subskrypcję
       const nextDate = new Date()
       nextDate.setDate(nextDate.getDate() + 30)
