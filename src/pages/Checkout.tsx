@@ -33,6 +33,7 @@ export default function Checkout({ session }: { session: Session }) {
   }, [session.user.id])
 
   const submit = async () => {
+    const validProducts = products.filter((id: string) => !id.startsWith('seed-'))
     if (!address.street || !address.city || !address.postal) {
       setError('Uzupełnij wszystkie pola adresu')
       return
@@ -136,7 +137,6 @@ export default function Checkout({ session }: { session: Session }) {
       console.log('Subskrypcja utworzona:', sub.id)
 
       // 4. Zapisz produkty w subskrypcji
-      const validProducts = products.filter((id: string) => !id.startsWith('seed-'))
 
       if (validProducts.length > 0) {
         const { error: itemsError } = await supabase
