@@ -68,7 +68,6 @@ export default function Dashboard({ session }: { session: Session }) {
   )
 
   const activeSubs  = subs.filter(s => s.status === 'active')
-  const pausedSubs  = subs.filter(s => s.status === 'paused')
 
   return (
     <div style={{ minHeight:'100vh', background:'#FAF6EF', padding:'3rem 1rem' }}>
