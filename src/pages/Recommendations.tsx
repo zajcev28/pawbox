@@ -5,6 +5,7 @@ import { getRecommendations, calculateDailyCalories } from '../lib/recommender'
 import { useAIRecommendations } from '../hooks/useAIRecommendations'
 import { useProducts } from '../hooks/useProducts'
 import { supabase } from '../lib/supabase'
+import { savePendingOrder } from '../lib/order'
 
 // ─── Typy ────────────────────────────────────────────────────────────────────
 interface BoxItem {
@@ -536,13 +537,17 @@ export default function Recommendations() {
               <p style={{ fontSize: '0.65rem', color: '#9ca3af', margin: '0.25rem 0 0' }}>* szacunkowy koszt</p>
               <button
                 onClick={() => {
-                  sessionStorage.setItem('selectedPlan', plan.id)
-                  sessionStorage.setItem('selectedProducts', JSON.stringify(box.map(b => b.product.id)))
-                  sessionStorage.setItem('boxItems', JSON.stringify(box.map(b => ({
-                    product_id: b.product.id,
-                    grams_total: b.grams_total,
+                  if (!profile) return
+                  savePendingOrder({
+                    plan:        plan.id,
                     period_days: period,
-                  }))))
+                    profile,
+                    items: box.map(b => ({
+                      product_id:    b.product.id,
+                      nazwa:         b.product.nazwa,
+                      grams_per_day: b.grams_per_day,
+                    })),
+                  })
                   navigate('/checkout')
                 }}
                 disabled={box.length === 0}

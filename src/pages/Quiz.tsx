@@ -1,8 +1,9 @@
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import type { PetProfile } from '../types'
+import { useEffect, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import type { Pet, PetProfile } from '../types'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../hooks/useAuth'
+import AuthForm from '../components/AuthForm'
 
 const HEALTH = [
   { value:'overweight', label:'⚖️ Nadwaga' },
@@ -24,17 +25,30 @@ export default function Quiz() {
   const navigate = useNavigate()
   const { session } = useAuth()
   const [step, setStep] = useState(1)
+  const [searchParams] = useSearchParams()
+  const petParam = searchParams.get('pet')
   const [showAuth, setShowAuth] = useState(false)
-  const [authTab, setAuthTab] = useState<'login'|'register'>('register')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPass, setShowPass] = useState(false)
-  const [authError, setAuthError] = useState('')
-  const [authLoading, setAuthLoading] = useState(false)
   const [p, setP] = useState<Partial<PetProfile>>({
     name:'', species:'cat', age_group:'adult', weight_kg:4,
     activity_level:'medium', health_conditions:[], allergies:[], food_type:'mixed'
   })
+
+  // Quiz dla istniejącego pupila (link „+ zestaw” z panelu) — wypełnij danymi z bazy
+  const userId = session?.user?.id
+  useEffect(() => {
+    if (!petParam || !userId) return
+    supabase.from('pets').select('*').eq('id', petParam).eq('user_id', userId).maybeSingle()
+      .then(({ data }) => {
+        const pet = data as Pet | null
+        if (!pet) return
+        setP({
+          pet_id: pet.id, name: pet.name, species: pet.species, age_group: pet.age_group,
+          weight_kg: Number(pet.weight_kg) || 4, activity_level: pet.activity_level,
+          health_conditions: pet.health_conditions ?? [], allergies: pet.allergies ?? [],
+          food_type: pet.food_type ?? 'mixed',
+        })
+      })
+  }, [petParam, userId])
 
   const upd = (k: keyof PetProfile, v: unknown) => setP(prev => ({...prev, [k]:v}))
   const toggle = (k: 'health_conditions'|'allergies', v: string) => {
@@ -54,23 +68,7 @@ export default function Quiz() {
     borderRadius:'0.75rem', padding:'1rem', cursor:'pointer', textAlign:'left', width:'100%',
   })
 
-  const handleAuth = async () => {
-    setAuthLoading(true); setAuthError('')
-    const res = authTab === 'register'
-      ? await supabase.auth.signUp({ email, password })
-      : await supabase.auth.signInWithPassword({ email, password })
-    setAuthLoading(false)
-    if (res.error) { setAuthError(res.error.message); return }
-    if (authTab === 'register' && !res.data.session) {
-      setAuthError('Sprawdź email i kliknij link potwierdzający.')
-      return
-    }
-    setShowAuth(false)
-    navigate('/recommendations')
-  }
-
   const handleFinish = () => {
-    console.log('session przy kliknięciu:', session?.user?.email || 'BRAK SESJI')
     sessionStorage.setItem('quizProfile', JSON.stringify(p))
     if (session) {
       navigate('/recommendations')
@@ -116,7 +114,7 @@ export default function Quiz() {
             <div>
               <h2 style={{fontFamily:'Lora,Georgia,serif', fontSize:'1.75rem', marginBottom:'1.5rem'}}>Wiek i waga {p.name||'pupila'}</h2>
               <div style={{display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:'0.75rem', marginBottom:'1.5rem'}}>
-                {[{v:'kitten',l:'Kocię',s:'< 1 rok'},{v:'adult',l:'Dorosły',s:'1–7 lat'},{v:'senior',l:'Senior',s:'7+ lat'}].map(o=>(
+                {[{v:'kitten',l:p.species==='dog'?'Szczenię':'Kocię',s:'< 1 rok'},{v:'adult',l:'Dorosły',s:'1–7 lat'},{v:'senior',l:'Senior',s:'7+ lat'}].map(o=>(
                   <button key={o.v} onClick={()=>upd('age_group',o.v)} style={{...sel(p.age_group===o.v), textAlign:'center'}}>
                     <div style={{fontWeight:600}}>{o.l}</div>
                     <div style={{fontSize:'0.75rem', color:'#6b7280'}}>{o.s}</div>
@@ -235,57 +233,14 @@ export default function Quiz() {
               </p>
             </div>
 
-            {/* Taby */}
-            <div style={{display:'flex', marginBottom:'1.5rem', borderBottom:'2px solid #E8DFD0'}}>
-              {(['register','login'] as const).map(t => (
-                <button key={t} onClick={() => { setAuthTab(t); setAuthError('') }}
-                  style={{flex:1, padding:'0.65rem', background:'none', border:'none', cursor:'pointer',
-                    fontWeight: authTab===t ? 600 : 400,
-                    color: authTab===t ? '#1b5c3a' : '#6b7280',
-                    borderBottom: authTab===t ? '2px solid #1b5c3a' : '2px solid transparent',
-                    marginBottom:'-2px', fontSize:'0.9rem'}}>
-                  {t === 'register' ? 'Utwórz konto' : 'Zaloguj się'}
-                </button>
-              ))}
-            </div>
+            <AuthForm initialTab="register"
+              onSignedIn={() => { setShowAuth(false); navigate('/recommendations') }}
+              submitLabel={{ register:'Utwórz konto i kontynuuj →', login:'Zaloguj się i kontynuuj →' }} />
 
-            <div style={{display:'flex', flexDirection:'column', gap:'0.75rem'}}>
-              <div>
-                <label style={{display:'block', fontSize:'0.875rem', marginBottom:'0.3rem', color:'#374151'}}>Email</label>
-                <input className="input" type="email" placeholder="twoj@email.com"
-                  value={email} onChange={e => setEmail(e.target.value)} />
-              </div>
-              <div>
-                <label style={{display:'block', fontSize:'0.875rem', marginBottom:'0.3rem', color:'#374151'}}>Hasło</label>
-                <div style={{position:'relative'}}>
-                  <input className="input" type={showPass ? 'text' : 'password'}
-                    placeholder="minimum 6 znaków"
-                    value={password} onChange={e => setPassword(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') handleAuth() }}
-                    style={{paddingRight:'2.75rem'}} />
-                  <button type="button" onClick={() => setShowPass(v => !v)}
-                    style={{position:'absolute', right:'0.75rem', top:'50%', transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', color:'#6b7280', fontSize:'1.1rem', padding:0}}>
-                    {showPass ? '👁️' : '🙈'}
-                  </button>
-                </div>
-              </div>
-
-              {authError && (
-                <div style={{padding:'0.65rem', background:'#fff5f5', border:'1px solid #fecaca', borderRadius:'0.75rem', fontSize:'0.8rem', color:'#dc2626'}}>
-                  {authError}
-                </div>
-              )}
-
-              <button onClick={handleAuth} disabled={authLoading || !email || !password}
-                className="btn-primary" style={{width:'100%', padding:'0.875rem', fontSize:'1rem'}}>
-                {authLoading ? '⏳ Ładowanie...' : authTab === 'register' ? 'Utwórz konto i kontynuuj →' : 'Zaloguj się i kontynuuj →'}
-              </button>
-
-              <button onClick={() => setShowAuth(false)}
-                style={{background:'none', border:'none', color:'#9ca3af', fontSize:'0.8rem', cursor:'pointer', textAlign:'center'}}>
-                ← Wróć do quizu
-              </button>
-            </div>
+            <button onClick={() => setShowAuth(false)}
+              style={{display:'block', margin:'0.75rem auto 0', background:'none', border:'none', color:'#9ca3af', fontSize:'0.8rem', cursor:'pointer'}}>
+              ← Wróć do quizu
+            </button>
           </div>
         </div>
       )}

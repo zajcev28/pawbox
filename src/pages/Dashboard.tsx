@@ -10,9 +10,12 @@ interface SubWithPet {
   status: 'active' | 'paused' | 'cancelled'
   next_delivery_date: string | null
   delivery_frequency_days: number
-  pet_id: string | null
-  pets: { name: string; species: string } | null
   items_count: number
+  box_pets: { id: string; name: string; species: string }[]
+}
+
+interface SubRow extends Omit<SubWithPet, 'items_count' | 'box_pets'> {
+  subscription_items: { id: string; pet_id: string | null; pets: { id: string; name: string; species: string } | null }[] | null
 }
 
 const PLAN_EMOJI = { starter: '🌱', comfort: '⭐', premium: '💎' }
@@ -35,9 +38,8 @@ export default function Dashboard({ session }: { session: Session }) {
         supabase
           .from('subscriptions')
           .select(`
-            id, plan_type, status, next_delivery_date, delivery_frequency_days, pet_id,
-            pets ( name, species ),
-            subscription_items ( id )
+            id, plan_type, status, next_delivery_date, delivery_frequency_days,
+            subscription_items ( id, pet_id, pets ( id, name, species ) )
           `)
           .eq('user_id', session.user.id)
           .neq('status', 'cancelled')
@@ -50,10 +52,13 @@ export default function Dashboard({ session }: { session: Session }) {
       ])
 
       if (subsRes.data) {
-        setSubs(subsRes.data.map((s: any) => ({
-          ...s,
-          items_count: s.subscription_items?.length || 0,
-        })))
+        setSubs((subsRes.data as unknown as SubRow[]).map(({ subscription_items, ...s }) => {
+          const items = subscription_items ?? []
+          const box_pets = [...new Map(
+            items.filter(i => i.pets).map(i => [i.pets!.id, i.pets!])
+          ).values()]
+          return { ...s, items_count: items.length, box_pets }
+        }))
       }
       if (petsRes.data) setPets(petsRes.data)
       setLoading(false)
@@ -86,10 +91,10 @@ export default function Dashboard({ session }: { session: Session }) {
 
         {/* Aktywne subskrypcje */}
         <h2 style={{ fontFamily:'Lora,Georgia,serif', fontSize:'1.25rem', margin:'0 0 1rem', color:'#144830' }}>
-          Moje subskrypcje
+          Mój box
           {activeSubs.length > 0 && (
             <span style={{ fontSize:'0.8rem', fontFamily:'DM Sans', background:'#d9ede2', color:'#1b5c3a', padding:'2px 10px', borderRadius:20, marginLeft:'0.75rem', fontWeight:400 }}>
-              {activeSubs.length} aktywne
+              aktywny
             </span>
           )}
         </h2>
@@ -104,8 +109,6 @@ export default function Dashboard({ session }: { session: Session }) {
           <div style={{ display:'flex', flexDirection:'column', gap:'0.75rem', marginBottom:'2rem' }}>
             {subs.map(sub => {
               const days = daysUntil(sub.next_delivery_date)
-              const petName = sub.pets?.name
-              const petSpecies = sub.pets?.species
 
               return (
                 <div key={sub.id} style={{ background:'white', borderRadius:'1rem', border:`1px solid ${sub.status==='active' ? '#E8DFD0' : '#f3f4f6'}`, padding:'1.25rem', opacity: sub.status === 'paused' ? 0.7 : 1 }}>
@@ -122,13 +125,13 @@ export default function Dashboard({ session }: { session: Session }) {
                         <span style={{ fontWeight:600, fontSize:'1rem' }}>
                           {PLAN_NAME[sub.plan_type]}
                         </span>
-                        {/* Pupil badge */}
-                        {petName && (
-                          <span style={{ fontSize:'0.8rem', padding:'2px 10px', borderRadius:20, background:'#f0f7f3', color:'#1b5c3a', border:'1px solid #d9ede2' }}>
-                            {petSpecies === 'cat' ? '🐱' : '🐶'} {petName}
+                        {/* Pupile w boxie */}
+                        {sub.box_pets.map(bp => (
+                          <span key={bp.id} style={{ fontSize:'0.8rem', padding:'2px 10px', borderRadius:20, background:'#f0f7f3', color:'#1b5c3a', border:'1px solid #d9ede2' }}>
+                            {bp.species === 'cat' ? '🐱' : '🐶'} {bp.name}
                           </span>
-                        )}
-                        {!petName && (
+                        ))}
+                        {sub.box_pets.length === 0 && (
                           <span style={{ fontSize:'0.8rem', padding:'2px 10px', borderRadius:20, background:'#f3f4f6', color:'#9ca3af' }}>
                             Pupil nieprzypisany
                           </span>
@@ -188,22 +191,22 @@ export default function Dashboard({ session }: { session: Session }) {
             ) : (
               <>
                 {pets.map(pet => {
-                  const petSubs = subs.filter(s => s.pet_id === pet.id && s.status === 'active')
+                  const inBox = subs.some(s => s.status !== 'cancelled' && s.box_pets.some(bp => bp.id === pet.id))
                   return (
                     <div key={pet.id} style={{ display:'flex', alignItems:'center', gap:'0.75rem', padding:'0.65rem 0', borderBottom:'1px solid #f3f4f6' }}>
                       <span style={{ fontSize:'1.5rem' }}>{pet.species === 'cat' ? '🐱' : '🐶'}</span>
                       <div style={{ flex:1 }}>
                         <div style={{ fontWeight:600, fontSize:'0.9rem' }}>{pet.name}</div>
                         <div style={{ fontSize:'0.75rem', color:'#6b7280' }}>
-                          {pet.weight_kg} kg · {pet.age_group === 'kitten' ? 'Kocię' : pet.age_group === 'adult' ? 'Dorosły' : 'Senior'}
+                          {pet.weight_kg} kg · {pet.age_group === 'kitten' ? (pet.species === 'dog' ? 'Szczenię' : 'Kocię') : pet.age_group === 'adult' ? 'Dorosły' : 'Senior'}
                         </div>
                       </div>
-                      {petSubs.length > 0 ? (
-                        <span style={{ fontSize:'0.7rem', padding:'2px 7px', borderRadius:20, background:'#d9ede2', color:'#1b5c3a' }}>
-                          aktywna
-                        </span>
+                      {inBox ? (
+                        <Link to={`/quiz?pet=${pet.id}`} title="Zmień zestaw" style={{ fontSize:'0.7rem', padding:'2px 7px', borderRadius:20, background:'#d9ede2', color:'#1b5c3a', textDecoration:'none' }}>
+                          w boxie
+                        </Link>
                       ) : (
-                        <Link to="/quiz" style={{ fontSize:'0.7rem', padding:'2px 7px', borderRadius:20, background:'#fef3c7', color:'#92400e', textDecoration:'none' }}>
+                        <Link to={`/quiz?pet=${pet.id}`} style={{ fontSize:'0.7rem', padding:'2px 7px', borderRadius:20, background:'#fef3c7', color:'#92400e', textDecoration:'none' }}>
                           + zestaw
                         </Link>
                       )}

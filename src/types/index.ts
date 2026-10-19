@@ -31,6 +31,7 @@ export interface Pet {
 }
 
 export interface PetProfile {
+  pet_id?: string          // ustawione, gdy quiz robiony dla istniejącego pupila
   name: string
   species: 'cat' | 'dog'
   age_group: 'kitten' | 'adult' | 'senior'
@@ -63,8 +64,9 @@ export interface SubscriptionItem {
   id: string
   subscription_id: string
   product_id: string
-  quantity_g: number
+  quantity_g: number        // gramy na jedną dostawę
   is_active: boolean
+  pet_id: string | null
   product?: Product
 }
 
