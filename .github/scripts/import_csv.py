@@ -1,208 +1,251 @@
 #!/usr/bin/env python3
 """
 GitHub Actions: importuje pliki CSV z folderów cat/ i dog/ do Supabase.
-Używa service_role key — działa z pominięciem RLS.
+
+Zasady (od migracji 20261019):
+  - UPSERT po kolumnie `nazwa` — istniejące produkty zachowują swoje id,
+    więc subskrypcje klientów nadal wskazują na właściwe karmy.
+  - Produkty, których nie ma już w CSV, dostają is_active=false (nie są kasowane).
+  - Bezpiecznik: jeśli CSV ma mniej niż MIN_RATIO obecnie aktywnych produktów
+    (np. scraper się przerwał), wyłączanie jest pomijane. Wymuś: FORCE_DEACTIVATE=1.
+  - Jakikolwiek błąd zapisu → nic nie jest wyłączane, a job kończy się błędem.
+
+Lokalny test bez bazy:  python3 .github/scripts/import_csv.py --dry-run
 """
 
-import os
 import csv
-import json
+import os
 import re
-import requests
+import sys
 from pathlib import Path
 
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]  # service_role, nie anon!
-
-HEADERS = {
-    "apikey":        SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type":  "application/json",
-    "Prefer":        "resolution=merge-duplicates",  # upsert po nazwie
+BATCH_SIZE = 200
+MIN_RATIO = 0.5
+FOLDERS = {"cat": "cat", "dog": "dog"}
+GRAINS = ["pszenica", "kukurydza", "ryż", "gluten", "owies", "jęczmień", "żyto", "mąka zbożowa"]
+PROTEIN_MAP = {
+    "chicken": ["kurczak", "drób"],
+    "salmon":  ["łosoś"],
+    "beef":    ["wołowina"],
+    "lamb":    ["jagnięcina", "jagnięce"],
+    "pork":    ["wieprzowina"],
+    "rabbit":  ["królik"],
+    "tuna":    ["tuńczyk"],
+    "turkey":  ["indyk"],
 }
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+DRY_RUN = "--dry-run" in sys.argv
+
+
+# ─── Parsowanie wierszy ───────────────────────────────────────────────────────
 
 def clean(v):
-    if v is None: return None
+    if v is None:
+        return None
     v = str(v).strip()
-    return v if v else None
+    return v or None
+
 
 def parse_price(v):
-    if not v: return None
-    try:
-        return float(re.search(r"[\d.,]+", v.replace(",", "."))[0])
-    except:
-        return None
+    m = re.search(r"\d+(?:[.,]\d+)?", str(v or ""))
+    return float(m.group(0).replace(",", ".")) if m else None
 
-def detect_species(nazwa: str, folder: str) -> str:
+
+def detect_species(row: dict, nazwa: str, folder_species: str) -> str:
     n = nazwa.lower()
-    if folder == "dog": return "dog"
-    if folder == "cat": return "cat"
-    if "dla psa i kota" in n: return "both"
-    if "dla psa" in n or "szczeniąt" in n or "puppy" in n: return "dog"
-    return "cat"
+    if "dla psa i kota" in n:
+        return "both"
+    declared = (clean(row.get("species")) or "").lower()
+    if declared in ("cat", "dog", "both"):
+        return declared
+    return folder_species
 
-def detect_food_type(nazwa: str, wilgotnosc: str) -> str:
+
+def detect_food_type(row: dict, nazwa: str, wilgotnosc: str) -> str:
+    declared = (clean(row.get("food_type")) or "").lower()
+    if declared in ("dry", "wet"):
+        return declared
     try:
-        w = float(str(wilgotnosc).replace("%","").replace(",","."))
-        return "wet" if w > 20 else "dry"
-    except:
+        return "wet" if float(str(wilgotnosc).replace("%", "").replace(",", ".")) > 20 else "dry"
+    except ValueError:
         pass
-    n = nazwa.lower()
-    return "dry" if any(x in n for x in ["sucha","suche","granul"]) else "wet"
+    return "dry" if any(x in nazwa.lower() for x in ("sucha", "suche", "granul")) else "wet"
+
 
 def analyze_ingredients(sklad: str):
     if not sklad:
         return True, [], None
     s = sklad.lower()
-    grains = ["pszenica","kukurydza","ryż","gluten","owies","jęczmień","żyto","mąka zbożowa"]
-    is_grain_free = not any(g in s for g in grains)
-    protein_map = {
-        "chicken": ["kurczak","drób"],
-        "salmon":  ["łosoś"],
-        "beef":    ["wołowina"],
-        "lamb":    ["jagnięcina","jagnięce"],
-        "pork":    ["wieprzowina"],
-        "rabbit":  ["królik"],
-        "tuna":    ["tuńczyk"],
-        "turkey":  ["indyk"],
-    }
-    proteins = [k for k, words in protein_map.items() if any(w in s for w in words)]
+    is_grain_free = not any(g in s for g in GRAINS)
+    proteins = [k for k, words in PROTEIN_MAP.items() if any(w in s for w in words)]
     m = re.search(r"(\d+)[,.]?\d*%\s*(mięso|kurczak|łosoś|wołowina|indyk|jagnięcina|królik|wieprzowina)", s)
-    meat_percent = int(m.group(1)) if m else None
-    return is_grain_free, proteins, meat_percent
+    return is_grain_free, proteins, int(m.group(1)) if m else None
 
-def row_to_product(row: dict, folder: str) -> dict:
-    nazwa = clean(row.get("Nazwa","")) or ""
-    sklad = clean(row.get("Skład","")) or clean(row.get("Sklad","")) or ""
-    wilg  = clean(row.get("Wilgotność","")) or clean(row.get("Wilgotnosc","")) or ""
+
+def row_to_product(row: dict, folder_species: str) -> dict:
+    nazwa = (clean(row.get("Nazwa")) or "")[:200]
+    sklad = clean(row.get("Skład")) or clean(row.get("Sklad")) or ""
+    wilg = clean(row.get("Wilgotność")) or clean(row.get("Wilgotnosc")) or ""
     is_gf, proteins, meat_pct = analyze_ingredients(sklad)
-
     return {
-        "nazwa":        nazwa[:200],
-        "cena":         parse_price(row.get("Cena","")),
-        "bialko":       clean(row.get("Białko",""))  or clean(row.get("Bialko","")),
-        "tluszcz":      clean(row.get("Tłuszcz","")) or clean(row.get("Tluszcz","")),
-        "wlokno":       clean(row.get("Włókno",""))  or clean(row.get("Wlokno","")),
-        "wilgotnosc":   clean(wilg),
-        "energia":      clean(row.get("Energia","")),
-        "sklad":        sklad[:3000] if sklad else None,
-        "opis":         (clean(row.get("Opis","")) or "")[:2000] or None,
-        "species":      detect_species(nazwa, folder),
-        "food_type":    detect_food_type(nazwa, wilg),
+        "nazwa":         nazwa,
+        "cena":          parse_price(row.get("Cena")),
+        "bialko":        clean(row.get("Białko")) or clean(row.get("Bialko")),
+        "tluszcz":       clean(row.get("Tłuszcz")) or clean(row.get("Tluszcz")),
+        "wlokno":        clean(row.get("Włókno")) or clean(row.get("Wlokno")),
+        "wilgotnosc":    wilg or None,
+        "energia":       clean(row.get("Energia")),
+        "sklad":         sklad[:3000] or None,
+        "opis":          (clean(row.get("Opis")) or "")[:2000] or None,
+        "species":       detect_species(row, nazwa, folder_species),
+        "food_type":     detect_food_type(row, nazwa, wilg),
         "is_grain_free": is_gf,
-        "proteins":     proteins,
-        "meat_percent": meat_pct,
+        "proteins":      proteins,
+        "meat_percent":  meat_pct,
+        "is_active":     True,
     }
 
-# ─── Supabase upsert ──────────────────────────────────────────────────────────
 
-def upsert_batch(products: list[dict]) -> tuple[int, int]:
-    """Wstaw lub zaktualizuj partię produktów. Zwraca (ok, errors)."""
-    r = requests.post(
-        f"{SUPABASE_URL}/rest/v1/products",
-        headers={**HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"},
-        json=products,
-        timeout=30,
-    )
-    if r.status_code in (200, 201):
-        return len(products), 0
-    else:
-        print(f"  ⚠ Błąd {r.status_code}: {r.text[:200]}")
-        return 0, len(products)
+def read_folder(folder: str, folder_species: str) -> dict:
+    """Zwraca {nazwa: produkt}. Przy powtórzonej nazwie wygrywa ostatni wiersz."""
+    products = {}
+    for csv_file in sorted(Path(folder).glob("*.csv")):
+        with open(csv_file, newline="", encoding="utf-8-sig") as f:
+            rows = 0
+            for row in csv.DictReader(f):
+                p = row_to_product(row, folder_species)
+                if p["nazwa"]:
+                    products[p["nazwa"]] = p
+                    rows += 1
+        print(f"  📄 {csv_file.name}: {rows} wierszy")
+    return products
 
-def delete_by_species(species: str):
-    """Usuń stare produkty danego gatunku przed reimportem."""
-    r = requests.delete(
-        f"{SUPABASE_URL}/rest/v1/products?species=eq.{species}",
-        headers=HEADERS,
-        timeout=15,
-    )
-    print(f"  🗑  Usunięto stare produkty species={species}: HTTP {r.status_code}")
+
+# ─── Supabase ─────────────────────────────────────────────────────────────────
+
+class Supabase:
+    def __init__(self, url: str, key: str):
+        import requests
+        self.http = requests.Session()
+        self.base = f"{url.rstrip('/')}/rest/v1"
+        self.http.headers.update({
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        })
+
+    def upsert(self, batch: list) -> None:
+        r = self.http.post(
+            f"{self.base}/products",
+            params={"on_conflict": "nazwa"},
+            headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+            json=batch,
+            timeout=60,
+        )
+        if r.status_code not in (200, 201, 204):
+            raise RuntimeError(f"upsert HTTP {r.status_code}: {r.text[:300]}")
+
+    def active_products(self, species: list) -> list:
+        out, start, step = [], 0, 1000
+        while True:
+            r = self.http.get(
+                f"{self.base}/products",
+                params={"select": "id,nazwa", "is_active": "eq.true",
+                        "species": f"in.({','.join(species)})", "order": "id"},
+                headers={"Range": f"{start}-{start + step - 1}"},
+                timeout=60,
+            )
+            if r.status_code not in (200, 206):
+                raise RuntimeError(f"select HTTP {r.status_code}: {r.text[:300]}")
+            page = r.json()
+            out += page
+            if len(page) < step:
+                return out
+            start += step
+
+    def deactivate(self, ids: list) -> None:
+        for i in range(0, len(ids), 100):
+            chunk = ids[i:i + 100]
+            r = self.http.patch(
+                f"{self.base}/products",
+                params={"id": f"in.({','.join(chunk)})"},
+                headers={"Prefer": "return=minimal"},
+                json={"is_active": False},
+                timeout=60,
+            )
+            if r.status_code not in (200, 204):
+                raise RuntimeError(f"deactivate HTTP {r.status_code}: {r.text[:300]}")
+
 
 # ─── Główna logika ────────────────────────────────────────────────────────────
 
-def process_folder(folder: str) -> int:
-    path = Path(folder)
-    csv_files = list(path.glob("*.csv"))
-    if not csv_files:
-        print(f"  Brak plików CSV w /{folder}")
-        return 0
+def process_folder(db, folder: str, folder_species: str) -> bool:
+    products = read_folder(folder, folder_species)
+    if not products:
+        print("  Brak plików CSV lub wierszy — pomijam (nic nie wyłączam)")
+        return True
 
-    all_products = []
-    for csv_file in csv_files:
-        print(f"  📄 Przetwarzam: {csv_file.name}")
+    items = list(products.values())
+    species_seen = sorted({p["species"] for p in items})
+    print(f"  {len(items)} unikalnych produktów, gatunki: {', '.join(species_seen)}")
+
+    if DRY_RUN:
+        sample = items[0]
+        print(f"  [dry-run] przykład: {sample['nazwa'][:60]} | {sample['species']} | "
+              f"{sample['food_type']} | {sample['cena']} zł | bezzbożowa={sample['is_grain_free']}")
+        return True
+
+    # 1. Upsert — przy błędzie przerywamy, zanim cokolwiek zostanie wyłączone
+    for i in range(0, len(items), BATCH_SIZE):
+        db.upsert(items[i:i + BATCH_SIZE])
+        print(f"  ✓ upsert {min(i + BATCH_SIZE, len(items))}/{len(items)}")
+
+    # 2. Wyłącz produkty tych gatunków, których nie ma w CSV
+    active = db.active_products(species_seen)
+    missing = [p["id"] for p in active if p["nazwa"] not in products]
+    if not missing:
+        print("  Nic do wyłączenia")
+        return True
+
+    remaining = len(active) - len(missing)
+    if remaining < len(active) * MIN_RATIO and os.environ.get("FORCE_DEACTIVATE") != "1":
+        print(f"  ⚠ Bezpiecznik: CSV pokrywa tylko {remaining}/{len(active)} aktywnych produktów. "
+              f"Pomijam wyłączanie {len(missing)} pozycji (ustaw FORCE_DEACTIVATE=1, żeby wymusić).")
+        return True
+
+    db.deactivate(missing)
+    print(f"  ⏸  Wyłączono {len(missing)} produktów, których nie ma już w CSV")
+    return True
+
+
+def main() -> int:
+    print("=" * 55)
+    print("  🐾  PawBox — Import CSV → Supabase" + ("  [DRY RUN]" if DRY_RUN else ""))
+    print("=" * 55)
+
+    db = None
+    if not DRY_RUN:
+        url, key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY")
+        if not url or not key:
+            print("✗ Brak SUPABASE_URL lub SUPABASE_SERVICE_KEY w secrets")
+            return 1
+        db = Supabase(url, key)
+
+    failed = False
+    for folder, species in FOLDERS.items():
+        print(f"\n📂 /{folder}")
+        if not Path(folder).is_dir():
+            print("  folder nie istnieje — pomijam")
+            continue
         try:
-            with open(csv_file, newline="", encoding="utf-8-sig") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    p = row_to_product(row, folder)
-                    if p["nazwa"]:
-                        all_products.append(p)
-        except Exception as e:
-            print(f"  ✗ Błąd odczytu {csv_file.name}: {e}")
+            process_folder(db, folder, species)
+        except Exception as e:  # noqa: BLE001 — chcemy zalogować i oznaczyć job jako nieudany
+            print(f"  ✗ {e}")
+            failed = True
 
-    if not all_products:
-        return 0
-
-    print(f"  Znaleziono {len(all_products)} produktów — importuję...")
-
-    # Usuń stare dane tego gatunku
-    species_in_folder = "cat" if folder == "cat" else "dog"
-    delete_by_species(species_in_folder)
-    if folder == "cat":
-        delete_by_species("both")  # produkty shared też odśwież
-
-    # Wstawiaj partiami po 200
-    total_ok = 0
-    total_err = 0
-    for i in range(0, len(all_products), 200):
-        batch = all_products[i:i+200]
-        ok, err = upsert_batch(batch)
-        total_ok += ok
-        total_err += err
-        print(f"  Batch {i//200 + 1}: {ok} OK, {err} błędów")
-
-    return total_ok
-
-
-def main():
-    print("=" * 55)
-    print("  🐾  PawBox — Import CSV → Supabase")
-    print("=" * 55)
-
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        print("✗ Brak SUPABASE_URL lub SUPABASE_SERVICE_KEY w secrets!")
-        exit(1)
-
-    # Sprawdź jakie foldery mają zmienione pliki (przez git diff)
-    changed = os.environ.get("CHANGED_FILES", "")
-    folders_to_process = set()
-
-    if "cat/" in changed or not changed:
-        folders_to_process.add("cat")
-    if "dog/" in changed or not changed:
-        folders_to_process.add("dog")
-
-    # Fallback: przetwórz wszystko
-    if not folders_to_process:
-        folders_to_process = {"cat", "dog"}
-
-    total = 0
-    for folder in sorted(folders_to_process):
-        if Path(folder).exists():
-            print(f"\n📂 Folder: /{folder}")
-            n = process_folder(folder)
-            total += n
-            print(f"  ✅ Zaimportowano: {n} produktów")
-        else:
-            print(f"\n📂 /{folder} — folder nie istnieje, pomijam")
-
-    print(f"\n{'='*55}")
-    print(f"  GOTOWE: {total} produktów zaimportowanych do Supabase")
-    print(f"{'='*55}")
+    print("\n" + ("✗ Import zakończony z błędami" if failed else "✅ Import zakończony"))
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

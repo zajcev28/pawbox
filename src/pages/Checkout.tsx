@@ -156,18 +156,11 @@ export default function Checkout({ session }: { session: Session }) {
       try {
         await fetch('/api/send-email', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 'order_confirmation',
-            to:   session.user.email,
-            data: {
-              orderId:      sub.id,
-              petName:      profile.name || 'pupil',
-              planName:     plan,
-              nextDelivery: nextDeliveryDate,
-              itemCount:    products.length,
-            },
-          }),
+          headers: {
+            'Content-Type':  'application/json',
+            'Authorization': `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({ type: 'order_confirmation', subscriptionId: sub.id }),
         })
       } catch (e) {
         console.error('Mail error:', e)
@@ -182,9 +175,9 @@ export default function Checkout({ session }: { session: Session }) {
       setDone(true)
       setTimeout(() => navigate('/dashboard'), 3000)
 
-    } catch (e: any) {
+    } catch (e) {
       console.error('Checkout error:', e)
-      setError('Coś poszło nie tak: ' + e.message)
+      setError('Coś poszło nie tak: ' + (e instanceof Error ? e.message : String(e)))
     } finally {
       setSaving(false)
     }

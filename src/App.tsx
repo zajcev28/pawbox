@@ -12,7 +12,6 @@ import Pets from './pages/Pets'
 import Subscription from './pages/Subscription'
 import Checkout from './pages/Checkout'
 import Settings from './pages/Settings'
-import AdminImport from './pages/AdminImport'
 
 function Protected({ session, children }: { session: Session | null; children: React.ReactNode }) {
   if (!session) {
@@ -40,7 +39,6 @@ export default function App() {
           <Route path="/quiz" element={<Quiz />} />
           <Route path="/recommendations" element={<Recommendations />} />
           <Route path="/auth" element={<Auth session={session} />} />
-          <Route path="/admin/import" element={<AdminImport />} />
           <Route path="/dashboard" element={<Protected session={session}><Dashboard session={session!} /></Protected>} />
           <Route path="/pets" element={<Protected session={session}><Pets session={session!} /></Protected>} />
           <Route path="/subscription" element={<Protected session={session}><Subscription session={session!} /></Protected>} />

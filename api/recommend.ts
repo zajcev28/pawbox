@@ -1,6 +1,27 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
 
-const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
+const GROQ_API_URL         = 'https://api.groq.com/openai/v1/chat/completions'
+const SUPABASE_URL         = process.env.SUPABASE_URL!
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!
+const MAX_PRODUCTS         = 15
+
+const HEALTH    = ['overweight', 'sensitive_digestion', 'kidney', 'skin_coat', 'dental']
+const ALLERGIES = ['grain', 'chicken', 'fish', 'beef', 'soy', 'dairy']
+
+async function isLoggedIn(req: VercelRequest): Promise<boolean> {
+  const header = req.headers['authorization']
+  if (!header || !header.startsWith('Bearer ')) return false
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: header },
+  })
+  return res.ok
+}
+
+const str = (v: unknown, max: number) => (typeof v === 'string' ? v : v == null ? '' : String(v)).slice(0, max)
+const oneOf = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
+  allowed.includes(v as T) ? (v as T) : fallback
+const listOf = (v: unknown, allowed: string[]) =>
+  Array.isArray(v) ? v.filter((x): x is string => allowed.includes(x)) : []
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') {
@@ -8,29 +29,45 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const apiKey = process.env.GROQ_API_KEY
-  if (!apiKey) {
-    return res.status(500).json({ error: 'GROQ_API_KEY not configured' })
+  if (!apiKey || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    return res.status(500).json({ error: 'Server not configured' })
   }
 
-  const { profile, products } = req.body
+  if (!(await isLoggedIn(req))) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
 
-  if (!profile || !products) {
+  const body = req.body || {}
+  if (!body.profile || !Array.isArray(body.products) || body.products.length === 0) {
     return res.status(400).json({ error: 'Missing profile or products' })
   }
 
-  // Przygotuj uproszczoną listę produktów dla AI (max 30 pozycji)
-  const productList = products.slice(0, 15).map((p: any, i: number) => ({
-    idx: i,
-    nazwa: p.nazwa?.substring(0, 80),
-    bialko: p.bialko,
-    tluszcz: p.tluszcz,
-    wlokno: p.wlokno,
-    wilgotnosc: p.wilgotnosc,
-    energia: p.energia,
-    is_grain_free: p.is_grain_free,
-    proteins: p.proteins,
-    food_type: p.food_type,
-    cena: p.cena,
+  // Profil tylko z dozwolonych wartości — nic z body nie trafia do promptu bez filtra
+  const weight = Number(body.profile.weight_kg)
+  const profile = {
+    name:              str(body.profile.name, 40).replace(/[\r\n]/g, ' '),
+    species:           oneOf(body.profile.species, ['cat', 'dog'] as const, 'cat'),
+    age_group:         oneOf(body.profile.age_group, ['kitten', 'adult', 'senior'] as const, 'adult'),
+    activity_level:    oneOf(body.profile.activity_level, ['low', 'medium', 'high'] as const, 'medium'),
+    food_type:         oneOf(body.profile.food_type, ['dry', 'wet', 'mixed'] as const, 'mixed'),
+    weight_kg:         Number.isFinite(weight) ? Math.min(Math.max(weight, 0.5), 80) : 4,
+    health_conditions: listOf(body.profile.health_conditions, HEALTH),
+    allergies:         listOf(body.profile.allergies, ALLERGIES),
+  }
+  const products = body.products.slice(0, MAX_PRODUCTS)
+
+  // Każde pole produktu przycięte i bez znaków nowej linii
+  const clean = (v: unknown, max: number) => str(v, max).replace(/[\r\n|]/g, ' ')
+  interface PromptProduct { idx: number; nazwa: string; bialko: string; tluszcz: string; energia: string; is_grain_free: boolean; food_type: 'dry' | 'wet'; cena: number }
+  const productList: PromptProduct[] = products.map((p: Record<string, unknown>, i: number) => ({
+    idx:           i,
+    nazwa:         clean(p.nazwa, 80),
+    bialko:        clean(p.bialko, 12),
+    tluszcz:       clean(p.tluszcz, 12),
+    energia:       clean(p.energia, 30),
+    is_grain_free: p.is_grain_free === true,
+    food_type:     p.food_type === 'dry' ? 'dry' : 'wet',
+    cena:          Number(p.cena) || 0,
   }))
 
   const prompt = `Jesteś ekspertem od żywienia kotów i psów. Na podstawie profilu pupila i listy dostępnych karm, wybierz najlepsze dopasowanie.

@@ -18,7 +18,9 @@ export function useProducts() {
         const { data, error } = await supabase
           .from('products')
           .select('*')
+          .eq('is_active', true)
           .order('cena', { ascending: true })
+          .order('id', { ascending: true }) // stabilna kolejność między stronami — bez tego produkty o tej samej cenie dublowały się
           .range(from, from + step - 1)
 
         if (error || !data) break

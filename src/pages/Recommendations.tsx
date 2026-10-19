@@ -245,7 +245,7 @@ export default function Recommendations() {
 
     const loadAI = async () => {
       // Pre-filtruj JS żeby wysłać do AI tylko sensowne produkty
-      const preFiltered = getRecommendations(products, profile).slice(0, 30)
+      const preFiltered = getRecommendations(products, profile).slice(0, 15)
       const result = await getAIRecs(profile, preFiltered)
 
       if (result) {

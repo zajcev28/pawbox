@@ -25,3 +25,5 @@ dist-ssr
 scraper_zooexpress.py
 products_zooexpress.csv
 .vercel
+__pycache__/
+*.pyc

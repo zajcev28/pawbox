@@ -5,6 +5,18 @@ on:
     paths:
       - 'cat/*.csv'
       - 'dog/*.csv'
+      - '.github/scripts/import_csv.py'
+  workflow_dispatch:
+    inputs:
+      force_deactivate:
+        description: 'Wyłącz brakujące produkty nawet gdy CSV jest dużo mniejszy niż katalog'
+        type: boolean
+        default: false
+
+# Dwa importy naraz mogłyby się nadpisywać — drugi czeka na pierwszy
+concurrency:
+  group: import-csv
+  cancel-in-progress: false
 
 jobs:
   import:
@@ -12,16 +24,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
         run: pip install requests
 
+      - name: Dry run (walidacja CSV)
+        run: python3 .github/scripts/import_csv.py --dry-run
+
       - name: Import CSVs to Supabase
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          FORCE_DEACTIVATE: ${{ inputs.force_deactivate && '1' || '0' }}
         run: python3 .github/scripts/import_csv.py

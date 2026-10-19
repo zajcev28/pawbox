@@ -15,17 +15,14 @@
     "@supabase/supabase-js": "^2.103.3",
     "date-fns": "^4.1.0",
     "lucide-react": "^1.8.0",
-    "papaparse": "^5.5.3",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "react-dropzone": "^15.0.0",
     "react-router-dom": "^7.14.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
     "@tailwindcss/vite": "^4.2.2",
     "@types/node": "^24.12.2",
-    "@types/papaparse": "^5.5.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vercel/node": "^5.7.13",

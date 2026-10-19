@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { Product, PetProfile, ScoredProduct } from '../types'
+import { supabase } from '../lib/supabase'
 
 interface AIRecommendation {
   idx: number
@@ -24,15 +25,21 @@ export function useAIRecommendations() {
     setError(null)
 
     try {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) throw new Error('Brak sesji — zaloguj się')
+
       const res = await fetch('/api/recommend', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${session.access_token}`,
+        },
         body: JSON.stringify({ profile, products }),
       })
 
       if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.error || 'Błąd serwera')
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || `Błąd serwera (${res.status})`)
       }
 
       const data: AIResult = await res.json()
@@ -51,9 +58,9 @@ export function useAIRecommendations() {
 
       return { products: scored, dailyCalories: data.daily_calories }
 
-    } catch (e: any) {
+    } catch (e) {
       console.error('AI recommendations error:', e)
-      setError(e.message || 'Nie udało się pobrać rekomendacji AI')
+      setError(e instanceof Error ? e.message : 'Nie udało się pobrać rekomendacji AI')
       return null
     } finally {
       setLoading(false)
