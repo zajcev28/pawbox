@@ -33,6 +33,7 @@ export interface Pet {
 
 export interface PetProfile {
   pet_id?: string          // ustawione, gdy quiz robiony dla istniejącego pupila
+  mode?: 'quiz' | 'manual' // manual = „Wiem, czego chcę” (bez propozycji algorytmu)
   name: string
   species: 'cat' | 'dog'
   age_group: 'kitten' | 'adult' | 'senior'

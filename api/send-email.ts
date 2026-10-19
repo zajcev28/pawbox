@@ -52,7 +52,7 @@ function orderHtml(d: { orderId: string; petName: string; planName: string; next
     <p style="color:#374151;line-height:1.6">Dziękujemy! Twój PawBox dla <strong>${esc(d.petName)}</strong> jest już w przygotowaniu.</p>
     <table style="width:100%;background:#f0f7f3;border-radius:12px;padding:12px 20px;margin:24px 0;font-size:14px;border-collapse:separate">
       <tr><td style="color:#6b7280;padding:6px 0">Numer zamówienia</td><td style="text-align:right;font-weight:bold">#${esc(d.orderId.substring(0, 8).toUpperCase())}</td></tr>
-      <tr><td style="color:#6b7280;padding:6px 0">Plan</td><td style="text-align:right;font-weight:bold">${esc(d.planName)}</td></tr>
+      <tr><td style="color:#6b7280;padding:6px 0">Status boxa</td><td style="text-align:right;font-weight:bold">${esc(d.planName)}</td></tr>
       <tr><td style="color:#6b7280;padding:6px 0">Liczba karm</td><td style="text-align:right;font-weight:bold">${esc(d.itemCount)}</td></tr>
       <tr><td style="color:#6b7280;padding:6px 0">Pierwsza dostawa</td><td style="text-align:right;font-weight:bold;color:#1B5C3A">${esc(d.nextDelivery)}</td></tr>
     </table>

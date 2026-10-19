@@ -1,636 +1,366 @@
-import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import type { PetProfile, ScoredProduct } from '../types'
-import { getRecommendations, calculateDailyCalories, gramsForKcal, parseKcal } from '../lib/recommender'
+import { calculateDailyCalories, getRecommendations, MAX_GRAMS_PER_DAY, gramsForKcal } from '../lib/recommender'
 import { useAIRecommendations } from '../hooks/useAIRecommendations'
 import { useProducts } from '../hooks/useProducts'
+import { useAuth } from '../hooks/useAuth'
 import { supabase } from '../lib/supabase'
-import { savePendingOrder, PLAN_MAX_FOODS } from '../lib/order'
+import { savePendingOrder, gramsPerDelivery } from '../lib/order'
+import { priceBox, fmtPack, fmtPLN, type PriceInput } from '../lib/pricing'
+import { rebalance, suggestedGpd, kcalOf } from '../lib/portions'
+import ProductCatalog from '../components/ProductCatalog'
+import ProductDetails from '../components/ProductDetails'
+import TierStatus from '../components/TierStatus'
 
-// ─── Typy ────────────────────────────────────────────────────────────────────
-interface BoxItem {
-  product: ScoredProduct
-  grams_per_day: number
-  grams_total: number
-  bags: number
-  monthly_cost: number
+// Kreator boxa: algorytm proponuje, klient decyduje.
+// Bez limitu karm i bez blokad — karmy niepasujące do quizu dodaje się po potwierdzeniu.
+
+interface DraftItem {
+  product:   ScoredProduct
+  energia:   string | null
+  food_type: 'dry' | 'wet'
+  gpd:       number
+  custom:    boolean
 }
 
-interface Plan {
-  id: 'starter' | 'comfort' | 'premium'
-  name: string
-  emoji: string
-  features: string[]
-  discount: number
-  maxFoods: number
-  featured: boolean
+interface ExistingBox {
+  freq:   number
+  others: PriceInput[]       // karmy pozostałych pupili w boxie
 }
 
-// ─── Stałe ───────────────────────────────────────────────────────────────────
-const PLANS: Plan[] = [
-  { id: 'starter', name: 'Podstawowy', emoji: '🌱',
-    features: ['1 rodzaj karmy', 'Dostawa co 30 dni', '1 pupil'],
-    discount: 0, maxFoods: PLAN_MAX_FOODS.starter, featured: false },
-  { id: 'comfort', name: 'Komfortowy', emoji: '⭐',
-    features: ['Do 2 rodzajów karm', 'Dostawa co 14–30 dni', 'Do 2 pupili', 'Rabat 5%', 'Darmowa dostawa od 120 PLN'],
-    discount: 5, maxFoods: PLAN_MAX_FOODS.comfort, featured: true },
-  { id: 'premium', name: 'Premium', emoji: '💎',
-    features: ['Do 4 rodzajów karm', 'Dowolna częstotliwość', 'Nieograniczone pupile', 'Rabat 10%', 'Zawsze darmowa dostawa'],
-    discount: 10, maxFoods: PLAN_MAX_FOODS.premium, featured: false },
-]
+type CatalogState = { mode: 'add' } | { mode: 'swap'; index: number } | null
 
-const PERIODS = [
-  { id: 14, label: '2 tygodnie' },
-  { id: 30, label: 'Miesiąc' },
-]
+const INTERVALS = [14, 21, 30, 45, 60]
 
-const PROTEIN_LABELS: Record<string, string> = {
-  chicken: '🍗 Kurczak', salmon: '🐟 Łosoś', beef: '🥩 Wołowina',
-  lamb: '🐑 Jagnięcina', pork: '🐷 Wieprzowina', rabbit: '🐰 Królik',
-  tuna: '🐠 Tuńczyk', turkey: '🦃 Indyk',
+const toDraft = (p: ScoredProduct): DraftItem => ({ product: p, energia: p.energia, food_type: p.food_type, gpd: 0, custom: false })
+
+function readProfile(): PetProfile | null {
+  try {
+    const s = sessionStorage.getItem('quizProfile')
+    return s ? JSON.parse(s) as PetProfile : null
+  } catch { return null }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function buildBoxItem(product: ScoredProduct, dailyCal: number, days: number): BoxItem {
-  const grams_per_day = gramsForKcal(dailyCal, product.energia, product.food_type)
-  const grams_total = grams_per_day * days
-  const packGrams = product.food_type === 'wet' ? 400 : 2000
-  const bags = Math.ceil(grams_total / packGrams)
-  const monthly_cost = Math.round(bags * (product.cena || 10))
-  return { product, grams_per_day, grams_total, bags, monthly_cost }
-}
+export default function Recommendations() {
+  const navigate = useNavigate()
+  const { session } = useAuth()
+  const { products, loading: productsLoading } = useProducts()
+  const { getRecommendations: getAIRecs } = useAIRecommendations()
 
-function rebuildBoxItemWithGrams(item: BoxItem, newGramsPerDay: number, days: number): BoxItem {
-  const grams_total = newGramsPerDay * days
-  const packGrams = item.product.food_type === 'wet' ? 400 : 2000
-  const bags = Math.ceil(grams_total / packGrams)
-  const monthly_cost = Math.round(bags * (item.product.cena || 10))
-  return { ...item, grams_per_day: newGramsPerDay, grams_total, bags, monthly_cost }
-}
+  const [profile] = useState<PetProfile | null>(readProfile)
+  const manual = profile?.mode === 'manual'
 
-// ─── Komponent szczegółów (lazy load z Supabase) ──────────────────────────────
-function ProductDetails({ prod, dailyCal }: { prod: any; dailyCal: number }) {
-  const [details, setDetails] = useState<any>(null)
-  const [loading, setLoading] = useState(true)
+  const [items, setItems]       = useState<DraftItem[]>([])
+  const [proposing, setProposing] = useState(!manual)
+  const [period, setPeriod]     = useState(30)
+  const [existing, setExisting] = useState<ExistingBox | null>(null)
+  const [catalog, setCatalog]   = useState<CatalogState>(manual ? { mode: 'add' } : null)
+  const [detailsId, setDetailsId] = useState<string | null>(null)
 
+  const dailyCal = useMemo(() => profile
+    ? calculateDailyCalories(profile.weight_kg || 4, profile.age_group || 'adult', profile.activity_level || 'medium', profile.species)
+    : 0, [profile])
+
+  // ── Propozycja algorytmu (AI wybiera karmy, porcje liczymy w kodzie) ──────
   useEffect(() => {
-    if (!prod.id || prod.id.startsWith('seed-')) {
-      setDetails(prod)
-      setLoading(false)
-      return
-    }
-    supabase
-      .from('products')
-      .select('*')
-      .eq('id', prod.id)
-      .single()
-      .then(({ data }) => {
-        setDetails(data || prod)
-        setLoading(false)
-      })
-  }, [prod.id])
+    if (!profile || manual || productsLoading || products.length === 0) return
+    let alive = true
+    const recs = getRecommendations(products, profile)
+    getAIRecs(profile, recs.slice(0, 15)).then(ai => {
+      if (!alive) return
+      const candidates = ai?.products.length ? [...ai.products, ...recs] : recs
+      const picks: ScoredProduct[] = []
+      if (profile.food_type === 'mixed') {
+        const dry = candidates.find(p => p.food_type === 'dry')
+        const wet = candidates.find(p => p.food_type === 'wet')
+        if (dry) picks.push(dry)
+        if (wet) picks.push(wet)
+      } else if (candidates[0]) {
+        picks.push(candidates[0])
+      }
+      setItems(rebalance(picks.map(toDraft), dailyCal))
+      setProposing(false)
+    })
+    return () => { alive = false }
+    // getAIRecs zmienia tożsamość przy każdym renderze — propozycję liczymy raz dla profilu i katalogu
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile, manual, products, productsLoading, dailyCal])
 
-  if (loading) {
-    return (
-      <div style={{ padding: '1rem', textAlign: 'center', color: '#6b7280', fontSize: '0.875rem', borderTop: '1px solid #E8DFD0', background: '#fafafa' }}>
-        ⏳ Ładuję szczegóły...
-      </div>
-    )
+  // ── Istniejący box: wspólny interwał i karmy pozostałych pupili ──────────
+  const userId = session?.user?.id
+  useEffect(() => {
+    if (!userId || !profile) return
+    let alive = true
+    supabase.from('subscriptions')
+      .select('delivery_frequency_days, subscription_items ( quantity_g, pet_id, products ( nazwa, cena, food_type ), pets ( name, species ) )')
+      .eq('user_id', userId).neq('status', 'cancelled')
+      .order('created_at', { ascending: false }).limit(1).maybeSingle()
+      .then(({ data }) => {
+        if (!alive || !data) return
+        type Row = { quantity_g: number; pet_id: string | null; products: { nazwa: string; cena: number | null; food_type: 'dry' | 'wet' } | null; pets: { name: string; species: string } | null }
+        const rows = (data.subscription_items ?? []) as unknown as Row[]
+        const samePet = (r: Row) => profile.pet_id
+          ? r.pet_id === profile.pet_id
+          : r.pets?.species === profile.species && r.pets?.name.trim().toLowerCase() === profile.name.trim().toLowerCase()
+        setExisting({
+          freq: data.delivery_frequency_days || 30,
+          others: rows.filter(r => r.products && !samePet(r)).map(r => ({
+            nazwa: r.products!.nazwa, cena: r.products!.cena, food_type: r.products!.food_type, quantity_g: r.quantity_g,
+          })),
+        })
+      })
+    return () => { alive = false }
+  }, [userId, profile])
+
+  const freq = existing?.freq ?? period
+
+  // ── Ceny i status (całego boxa, łącznie z pozostałymi pupilami) ──────────
+  const mine: PriceInput[] = items.map(i => ({
+    nazwa: i.product.nazwa, cena: i.product.cena, food_type: i.food_type, quantity_g: gramsPerDelivery(i.gpd, freq),
+  }))
+  const pricing = priceBox([...mine, ...(existing?.others ?? [])], freq)
+  const myLines = pricing.lines.slice(0, mine.length)
+  const othersTotal = pricing.lines.slice(mine.length).reduce((s, l) => s + l.price, 0)
+  const totalKcal = Math.round(items.reduce((s, i) => s + kcalOf(i), 0))
+  const kcalOff = dailyCal > 0 && items.length > 0 && Math.abs(totalKcal - dailyCal) / dailyCal > 0.3
+
+  // ── Akcje ────────────────────────────────────────────────────────────────
+  const addProduct = (p: ScoredProduct) => setItems(prev => rebalance([...prev, toDraft(p)], dailyCal))
+  const removeAt   = (idx: number) => setItems(prev => rebalance(prev.filter((_, i) => i !== idx), dailyCal))
+  const swapAt     = (idx: number, p: ScoredProduct) => setItems(prev => prev.map((it, i) => i !== idx ? it : {
+    ...toDraft(p), custom: it.custom, gpd: gramsForKcal(kcalOf(it), p.energia, p.food_type),
+  }))
+  const setGrams   = (idx: number, g: number) => setItems(prev => prev.map((it, i) => i === idx ? { ...it, gpd: g, custom: true } : it))
+  const resetGrams = (idx: number) => setItems(prev => rebalance(prev.map((it, i) => i === idx ? { ...it, custom: false } : it), dailyCal))
+
+  const order = () => {
+    if (!profile || items.length === 0) return
+    savePendingOrder({
+      plan: pricing.tier.id,
+      period_days: freq,
+      profile,
+      items: items.map(i => ({
+        product_id: i.product.id, nazwa: i.product.nazwa, cena: i.product.cena,
+        food_type: i.food_type, grams_per_day: i.gpd,
+      })),
+    })
+    navigate('/checkout')
   }
 
-  const d = details
+  // ── Widok ────────────────────────────────────────────────────────────────
+  if (!profile) return (
+    <div style={{ minHeight:'100vh', background:'#FAF6EF', display:'flex', alignItems:'center', justifyContent:'center', padding:'1rem' }}>
+      <div className="card" style={{ textAlign:'center', maxWidth:420 }}>
+        <div style={{ fontSize:'3rem', marginBottom:'1rem' }}>🐾</div>
+        <p style={{ color:'#6b7280', marginBottom:'1.5rem' }}>Najpierw powiedz nam coś o pupilu.</p>
+        <Link to="/quiz" className="btn-primary">Zacznij →</Link>
+      </div>
+    </div>
+  )
+
+  const card: React.CSSProperties = { background:'white', borderRadius:'1rem', border:'1px solid #E8DFD0', padding:'1.1rem' }
+  const petName = profile.name || 'Twój pupil'
+  const ageLabel = profile.age_group === 'kitten' ? (profile.species === 'dog' ? 'Szczenię' : 'Kocię') : profile.age_group === 'senior' ? 'Senior' : 'Dorosły'
 
   return (
-    <div style={{ padding: '0.75rem', borderTop: '1px solid #E8DFD0', background: '#fafafa' }}>
+    <div style={{ minHeight:'100vh', background:'#FAF6EF', padding:'2rem 1rem 3rem' }}>
+      <div style={{ maxWidth:1000, margin:'0 auto' }}>
 
-      {/* Wartości odżywcze */}
-      <p style={{ fontSize: '0.7rem', fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 0.5rem' }}>
-        Wartości odżywcze (na 100g)
-      </p>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.4rem', marginBottom: '0.75rem' }}>
-        {[
-          { l: 'Białko', v: d.bialko },
-          { l: 'Tłuszcz', v: d.tluszcz },
-          { l: 'Włókno', v: d.wlokno },
-          { l: 'Wilgotność', v: d.wilgotnosc },
-          { l: 'Energia', v: d.energia },
-          { l: 'Mięso', v: d.meat_percent ? `${d.meat_percent}%` : null },
-        ].filter(n => n.v).map(n => (
-          <div key={n.l} style={{ background: 'white', borderRadius: '0.5rem', padding: '0.4rem', textAlign: 'center', border: '1px solid #E8DFD0' }}>
-            <div style={{ fontSize: '0.6rem', color: '#9ca3af' }}>{n.l}</div>
-            <div style={{ fontSize: '0.8rem', fontWeight: 600, color: '#1b5c3a' }}>{n.v}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Szacowana porcja */}
-      <div style={{ background: '#f0f7f3', borderRadius: '0.5rem', padding: '0.5rem 0.75rem', marginBottom: '0.75rem', fontSize: '0.8rem', color: '#1b5c3a' }}>
-        📏 Szacowana porcja dzienna: <strong>{Math.round((dailyCal / parseKcal(d.energia, d.food_type)) * 100)}g</strong>
-      </div>
-
-      {/* Źródła białka */}
-      {d.proteins && d.proteins.length > 0 && (
-        <div style={{ marginBottom: '0.75rem' }}>
-          <p style={{ fontSize: '0.7rem', fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 0.35rem' }}>
-            Źródła białka
-          </p>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem' }}>
-            {d.proteins.map((p: string) => (
-              <span key={p} style={{ fontSize: '0.75rem', padding: '2px 10px', borderRadius: 20, background: '#dbeafe', color: '#1d4ed8' }}>
-                {PROTEIN_LABELS[p] || p}
-              </span>
-            ))}
+        {/* Pupil */}
+        <div style={{ ...card, display:'flex', flexWrap:'wrap', gap:'1rem', alignItems:'center', marginBottom:'1.25rem' }}>
+          <span style={{ fontSize:'2.5rem' }}>{profile.species === 'cat' ? '🐱' : '🐶'}</span>
+          <div style={{ flex:'1 1 200px' }}>
+            <h1 style={{ fontFamily:'Lora,Georgia,serif', fontSize:'1.5rem', margin:0 }}>Box dla: {petName}</h1>
+            <p style={{ color:'#6b7280', fontSize:'0.875rem', margin:'0.25rem 0 0' }}>
+              {ageLabel} · {profile.weight_kg} kg · zapotrzebowanie ~{dailyCal} kcal/dzień
+              {' · '}<Link to={profile.pet_id ? `/quiz?pet=${profile.pet_id}` : '/quiz'} style={{ color:'#1b5c3a' }}>zmień dane</Link>
+            </p>
           </div>
         </div>
-      )}
 
-      {/* Bezzbożowa */}
-      {d.is_grain_free && (
-        <div style={{ marginBottom: '0.75rem' }}>
-          <span style={{ fontSize: '0.75rem', padding: '3px 10px', borderRadius: 20, background: '#d9ede2', color: '#1b5c3a' }}>
-            🌿 Karma bezzbożowa
-          </span>
+        <div style={{ display:'flex', flexWrap:'wrap', gap:'1.25rem', alignItems:'flex-start' }}>
+
+          {/* LEWA: zawartość */}
+          <div style={{ flex:'1 1 520px', minWidth:0 }}>
+
+            {/* Interwał */}
+            <div style={{ ...card, marginBottom:'1rem' }}>
+              <div style={{ fontSize:'0.875rem', fontWeight:600, marginBottom:'0.5rem' }}>Jak często dostawa?</div>
+              {existing ? (
+                <p style={{ fontSize:'0.85rem', color:'#6b7280', margin:0 }}>
+                  Twój box przyjeżdża co <strong style={{ color:'#1b5c3a' }}>{existing.freq} dni</strong> — karmy dla {petName} dołączą do tej samej dostawy.
+                  Interwał zmienisz w panelu „Mój box”.
+                </p>
+              ) : (
+                <div style={{ display:'flex', gap:'0.4rem', flexWrap:'wrap' }}>
+                  {INTERVALS.map(d => (
+                    <button key={d} type="button" onClick={() => setPeriod(d)}
+                      style={{ padding:'0.4rem 0.9rem', borderRadius:'2rem', cursor:'pointer', fontSize:'0.85rem',
+                        border:`2px solid ${period === d ? '#1b5c3a' : '#E8DFD0'}`,
+                        background: period === d ? '#1b5c3a' : 'white', color: period === d ? 'white' : '#374151', fontWeight: period === d ? 600 : 400 }}>
+                      co {d} dni
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div style={{ display:'flex', alignItems:'baseline', gap:'0.5rem', margin:'0 0 0.75rem', flexWrap:'wrap' }}>
+              <h2 style={{ fontFamily:'Lora,Georgia,serif', fontSize:'1.25rem', margin:0, flex:1 }}>
+                {manual ? 'Twoje karmy' : 'Proponowany zestaw'}
+              </h2>
+              {!manual && !proposing && <span style={{ fontSize:'0.8rem', color:'#6b7280' }}>Możesz wszystko zmienić</span>}
+            </div>
+
+            {proposing && (
+              <div style={{ ...card, textAlign:'center', color:'#1b5c3a', fontFamily:'Lora,Georgia,serif' }}>🔍 Dobieramy karmy dla {petName}…</div>
+            )}
+
+            {!proposing && items.length === 0 && (
+              <div style={{ ...card, textAlign:'center', padding:'2rem 1rem' }}>
+                <div style={{ fontSize:'2.5rem', marginBottom:'0.5rem' }}>🛒</div>
+                <p style={{ color:'#6b7280', margin:'0 0 1rem' }}>Box jest pusty — wybierz karmy z katalogu.</p>
+                <button type="button" className="btn-primary" onClick={() => setCatalog({ mode:'add' })}>Przeglądaj katalog →</button>
+              </div>
+            )}
+
+            {items.map((it, idx) => {
+              const line = myLines[idx]
+              const suggested = suggestedGpd(it, dailyCal, items.length)
+              const min = Math.max(5, Math.round(suggested * 0.3))
+              const max = Math.min(MAX_GRAMS_PER_DAY, Math.max(Math.round(suggested * 2.5), suggested + 50, it.gpd))
+              const lastsDays = it.gpd > 0 ? Math.floor(line.packs * line.pack.grams / it.gpd) : 0
+              const p = it.product
+              return (
+                <div key={p.id} style={{ ...card, marginBottom:'0.75rem' }}>
+                  <div style={{ display:'flex', gap:'0.75rem', alignItems:'flex-start', flexWrap:'wrap' }}>
+                    <div style={{ flex:'1 1 240px', minWidth:0 }}>
+                      <div style={{ display:'flex', gap:'0.35rem', marginBottom:'0.35rem', flexWrap:'wrap' }}>
+                        <Tag bg={it.food_type === 'wet' ? '#dbeafe' : '#fef3c7'} fg={it.food_type === 'wet' ? '#1d4ed8' : '#92400e'}>
+                          {it.food_type === 'wet' ? '💧 Mokra' : '🥜 Sucha'}
+                        </Tag>
+                        {p.is_grain_free && <Tag bg="#d9ede2" fg="#1b5c3a">🌿 Bezzbożowa</Tag>}
+                      </div>
+                      <p style={{ fontSize:'0.9rem', fontWeight:600, margin:'0 0 0.35rem', lineHeight:1.4 }}>{p.nazwa}</p>
+                      {p.warnings.length > 0
+                        ? p.warnings.map(w => <div key={w} style={{ fontSize:'0.75rem', color:'#92400e' }}>⚠ {w}</div>)
+                        : p.reasons.slice(0, 2).map(r => <div key={r} style={{ fontSize:'0.75rem', color:'#1b5c3a' }}>✓ {r}</div>)}
+                    </div>
+                    <div style={{ display:'flex', gap:'0.35rem', flexShrink:0 }}>
+                      <SmallBtn onClick={() => setDetailsId(detailsId === p.id ? null : p.id)}>{detailsId === p.id ? '▲ Skład' : '▼ Skład'}</SmallBtn>
+                      <SmallBtn onClick={() => setCatalog({ mode:'swap', index: idx })}>🔄 Zamień</SmallBtn>
+                      <SmallBtn danger onClick={() => removeAt(idx)}>🗑</SmallBtn>
+                    </div>
+                  </div>
+
+                  {/* Porcja */}
+                  <div style={{ marginTop:'0.65rem', paddingTop:'0.6rem', borderTop:'1px dashed #E8DFD0' }}>
+                    <div style={{ display:'flex', justifyContent:'space-between', fontSize:'0.8rem', color:'#6b7280', marginBottom:'0.2rem', gap:'0.5rem', flexWrap:'wrap' }}>
+                      <span>Porcja dzienna: <strong style={{ color:'#1b5c3a' }}>{it.gpd} g</strong></span>
+                      <span>
+                        zalecane ~{suggested} g
+                        {it.custom && <> · <button type="button" onClick={() => resetGrams(idx)} style={linkBtn}>przywróć</button></>}
+                      </span>
+                    </div>
+                    <input type="range" min={min} max={max} step={suggested > 200 ? 5 : 1} value={it.gpd}
+                      onChange={e => setGrams(idx, parseInt(e.target.value))}
+                      aria-label={`Porcja dzienna: ${p.nazwa}`} style={{ width:'100%', accentColor:'#1b5c3a' }} />
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', fontSize:'0.8rem', marginTop:'0.35rem', gap:'0.5rem', flexWrap:'wrap' }}>
+                      <span style={{ color:'#374151' }}>
+                        📦 {line.packs} × op. {fmtPack(line.pack.grams)}{line.pack.estimated ? ' (szac.)' : ''}
+                        <span style={{ color:'#9ca3af' }}> · starcza na ~{lastsDays} dni</span>
+                      </span>
+                      <strong style={{ color:'#1b5c3a' }}>{fmtPLN(line.price)}</strong>
+                    </div>
+                  </div>
+
+                  {detailsId === p.id && <div style={{ marginTop:'0.75rem' }}><ProductDetails product={p} /></div>}
+                </div>
+              )
+            })}
+
+            {!proposing && items.length > 0 && (
+              <>
+                {kcalOff && (
+                  <div style={{ fontSize:'0.8rem', color:'#92400e', background:'#fffbeb', border:'1px solid #fde68a', borderRadius:'0.75rem', padding:'0.6rem 0.8rem', marginBottom:'0.75rem' }}>
+                    ⚠ Łącznie ~{totalKcal} kcal dziennie, a zalecane ~{dailyCal} kcal. To Twoja decyzja — dajemy tylko znać.
+                  </div>
+                )}
+                <button type="button" onClick={() => setCatalog({ mode:'add' })}
+                  style={{ width:'100%', padding:'0.875rem', borderRadius:'1rem', border:'2px dashed #1b5c3a', background:'#f0f7f3', cursor:'pointer', color:'#1b5c3a', fontWeight:600, fontSize:'0.9rem' }}>
+                  + Dodaj karmę z katalogu
+                </button>
+              </>
+            )}
+          </div>
+
+          {/* PRAWA: podsumowanie */}
+          <aside style={{ flex:'1 1 300px', minWidth:0, display:'flex', flexDirection:'column', gap:'1rem', position:'sticky', top:'1rem' }}>
+            <TierStatus pricing={pricing} />
+
+            <div style={card}>
+              <h3 style={{ fontFamily:'Lora,Georgia,serif', fontSize:'1.1rem', margin:'0 0 0.6rem' }}>Jedna dostawa</h3>
+              {myLines.map((l, i) => (
+                <Row key={items[i].product.id} label={`${l.packs}× ${l.nazwa}`} value={fmtPLN(l.price)} muted />
+              ))}
+              {othersTotal > 0 && <Row label="Karmy pozostałych pupili" value={fmtPLN(othersTotal)} muted />}
+              {pricing.discountPLN > 0 && <Row label={`Rabat ${pricing.tier.name} −${pricing.tier.discount}%`} value={`−${fmtPLN(pricing.discountPLN)}`} accent />}
+              {pricing.lines.length > 0 && <Row label="Dostawa" value={pricing.shipping === 0 ? 'gratis' : fmtPLN(pricing.shipping)} muted />}
+              <div style={{ display:'flex', justifyContent:'space-between', fontWeight:700, fontSize:'1.1rem', padding:'0.6rem 0 0', borderTop:'2px solid #E8DFD0', marginTop:'0.4rem' }}>
+                <span>Razem</span><span style={{ color:'#1b5c3a' }}>{fmtPLN(pricing.total)}</span>
+              </div>
+              <div style={{ fontSize:'0.75rem', color:'#6b7280', textAlign:'right' }}>
+                co {freq} dni · ≈ {fmtPLN(pricing.totalMonthly)} / miesiąc
+              </div>
+              <button type="button" onClick={order} disabled={items.length === 0} className="btn-primary"
+                style={{ width:'100%', marginTop:'1rem', padding:'0.875rem', fontSize:'0.95rem', opacity: items.length === 0 ? 0.4 : 1 }}>
+                {existing ? 'Dodaj do mojego boxa →' : 'Przejdź do zamówienia →'}
+              </button>
+              <p style={{ fontSize:'0.7rem', color:'#9ca3af', margin:'0.5rem 0 0' }}>Ceny z katalogu, mogą się nieznacznie zmienić.</p>
+            </div>
+          </aside>
         </div>
-      )}
-
-      {/* Pełny skład */}
-      <div style={{ marginBottom: d.opis ? '0.75rem' : 0 }}>
-        <p style={{ fontSize: '0.7rem', fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 0.35rem' }}>
-          Pełny skład
-        </p>
-        {d.sklad ? (
-          <p style={{ fontSize: '0.8rem', color: '#374151', lineHeight: 1.6, margin: 0, background: 'white', padding: '0.6rem 0.75rem', borderRadius: '0.5rem', border: '1px solid #E8DFD0' }}>
-            {d.sklad}
-          </p>
-        ) : (
-          <p style={{ fontSize: '0.8rem', color: '#9ca3af', fontStyle: 'italic', margin: 0 }}>Brak danych o składzie</p>
-        )}
       </div>
 
-      {/* Opis producenta */}
-      {d.opis && (
-        <div>
-          <p style={{ fontSize: '0.7rem', fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 0.35rem' }}>
-            Opis producenta
-          </p>
-          <div style={{ fontSize: '0.8rem', color: '#374151', lineHeight: 1.7, background: 'white', padding: '0.6rem 0.75rem', borderRadius: '0.5rem', border: '1px solid #E8DFD0' }}>
-            {d.opis.split(/Wskazania|Zalety|Przeciwwskazania|Podawanie|Składniki/).map((section: string, i: number) => (
-              section.trim() ? <p key={i} style={{ margin: '0 0 0.5rem' }}>{section.trim()}</p> : null
-            ))}
-          </div>
-        </div>
+      {catalog && (
+        <ProductCatalog
+          profile={profile}
+          title={catalog.mode === 'swap' ? `Zamień: ${items[catalog.index]?.product.nazwa ?? 'karmę'}` : `Dodaj karmę dla: ${petName}`}
+          excludeIds={items.map(i => i.product.id)}
+          onClose={() => setCatalog(null)}
+          onPick={p => {
+            if (catalog.mode === 'swap') swapAt(catalog.index, p)
+            else addProduct(p)
+            setCatalog(null)
+          }}
+        />
       )}
     </div>
   )
 }
 
-// ─── Główny komponent ─────────────────────────────────────────────────────────
-export default function Recommendations() {
-  const navigate = useNavigate()
-  const { products, loading } = useProducts()
+const linkBtn: React.CSSProperties = { background:'none', border:'none', padding:0, color:'#1b5c3a', textDecoration:'underline', cursor:'pointer', fontSize:'0.8rem' }
 
-  const [profile, setProfile] = useState<PetProfile | null>(null)
-  const [box, setBox] = useState<BoxItem[]>([])
-  const [fullBox, setFullBox] = useState<BoxItem[]>([])
-  const [plan, setPlan] = useState<Plan>(PLANS[1])
-  const [period, setPeriod] = useState(30)
-  const [dailyCal, setDailyCal] = useState(0)
+function Tag({ bg, fg, children }: { bg: string; fg: string; children: React.ReactNode }) {
+  return <span style={{ fontSize:'0.7rem', padding:'2px 8px', borderRadius:20, background:bg, color:fg }}>{children}</span>
+}
 
-  const { getRecommendations: getAIRecs } = useAIRecommendations()
-
-  // modal
-  const [swapIndex, setSwapIndex] = useState<number | null>(null)
-  const [expandedBoxId, setExpandedBoxId] = useState<string | null>(null)
-  const [editingGrams, setEditingGrams]   = useState<Record<string, number>>({})
-  const [swapSearch, setSwapSearch] = useState('')
-  const [expandedId, setExpandedId] = useState<string | null>(null)
-
-  // ── Profil ────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    const s = sessionStorage.getItem('quizProfile')
-    if (s) setProfile(JSON.parse(s))
-  }, [])
-
-  // ── Rekomendacje (AI + fallback JS) ───────────────────────────────────────
-  useEffect(() => {
-    if (!profile || products.length === 0) return
-
-    const fallbackJS = (kcal: number) => {
-      const recs = getRecommendations(products, profile)
-      const full = recs.slice(0, 4).map(p => buildBoxItem(p, kcal, period))
-      setFullBox(full)
-      setBox(full.slice(0, plan.maxFoods))
-    }
-
-    const loadAI = async () => {
-      // Pre-filtruj JS żeby wysłać do AI tylko sensowne produkty
-      const preFiltered = getRecommendations(products, profile).slice(0, 15)
-      const result = await getAIRecs(profile, preFiltered)
-
-      if (result) {
-        setDailyCal(result.dailyCalories)
-        const full = result.products.slice(0, 4).map(p =>
-          buildBoxItem(p, result.dailyCalories, period)
-        )
-        setFullBox(full)
-        setBox(full.slice(0, plan.maxFoods))
-      } else {
-        // Fallback do algorytmu JS
-        const kcal = calculateDailyCalories(
-          profile.weight_kg, profile.age_group, profile.activity_level, profile.species
-        )
-        setDailyCal(kcal)
-        fallbackJS(kcal)
-      }
-    }
-
-    loadAI()
-  }, [profile, products])
-
-  // ── Przelicz przy zmianie okresu ──────────────────────────────────────────
-  useEffect(() => {
-    if (!dailyCal) return
-    setFullBox(prev => prev.map(item => buildBoxItem(item.product, dailyCal, period)))
-    setBox(prev => prev.map(item => buildBoxItem(item.product, dailyCal, period)))
-  }, [period, dailyCal])
-
-  // ── Zmiana planu ──────────────────────────────────────────────────────────
-  const changePlan = (newPlan: Plan) => {
-    setPlan(newPlan)
-    // Przywróć karmy z fullBox do limitu nowego planu
-    setBox(prev => {
-      const current = prev.slice(0, newPlan.maxFoods)
-      // Jeśli mamy mniej karm niż pozwala plan — uzupełnij z fullBox
-      const currentIds = new Set(current.map(b => b.product.id))
-      const extra = fullBox
-        .filter(b => !currentIds.has(b.product.id))
-        .slice(0, newPlan.maxFoods - current.length)
-      return [...current, ...extra]
-    })
-  }
-
-  // ── Akcje ────────────────────────────────────────────────────────────────
-  const removeItem = (idx: number) => setBox(prev => prev.filter((_, i) => i !== idx))
-
-  const swapItem = (idx: number, newProduct: ScoredProduct) => {
-    setBox(prev => {
-      const oldId = prev[idx]?.product.id
-      if (oldId) setEditingGrams(eg => { const n = {...eg}; delete n[oldId]; return n })
-      return prev.map((item, i) =>
-        i === idx ? buildBoxItem(newProduct, dailyCal, period) : item
-      )
-    })
-    setSwapIndex(null)
-    setSwapSearch('')
-    setExpandedId(null)
-  }
-
-  const addItem = (newProduct: ScoredProduct) => {
-    if (box.length >= plan.maxFoods) return
-    if (box.some(b => b.product.id === newProduct.id)) return
-    setBox(prev => [...prev, buildBoxItem(newProduct, dailyCal, period)])
-    setSwapIndex(null)
-    setSwapSearch('')
-    setExpandedId(null)
-  }
-
-  // ── Dostępne karmy w modalu ───────────────────────────────────────────────
-  const boxIds = new Set(box.map(b => b.product.id))
-  const available = (products as any[])
-    .filter((p: any) => !boxIds.has(p.id))
-    .filter((p: any) =>
-      swapSearch.length < 2
-        ? true
-        : p.nazwa.toLowerCase().includes(swapSearch.toLowerCase())
-    )
-    .sort((a: any, b: any) => {
-      const diff = ((b as any).score || 0) - ((a as any).score || 0)
-      if (diff !== 0) return diff
-      return (a.nazwa || '').localeCompare(b.nazwa || '', 'pl')
-    })
-
-  // ── Sumy ──────────────────────────────────────────────────────────────────
-  const totalCost = box.reduce((s, i) => s + i.monthly_cost, 0)
-  const finalCost = Math.round(totalCost * (1 - plan.discount / 100))
-
-  // ── Loading ───────────────────────────────────────────────────────────────
-  if (loading || !profile) {
-    return (
-      <div style={{ minHeight: '100vh', background: '#FAF6EF', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <p style={{ fontFamily: 'Lora,Georgia,serif', color: '#1b5c3a', fontSize: '1.25rem' }}>
-          🔍 Dobieramy karmy...
-        </p>
-      </div>
-    )
-  }
-
-  const cardStyle: React.CSSProperties = {
-    background: 'white', borderRadius: '1rem',
-    border: '1px solid #E8DFD0', padding: '1.25rem',
-  }
-
+function SmallBtn({ onClick, danger, children }: { onClick: () => void; danger?: boolean; children: React.ReactNode }) {
   return (
-    <div style={{ minHeight: '100vh', background: '#FAF6EF', padding: '2rem 1rem' }}>
-      <div style={{ maxWidth: 960, margin: '0 auto' }}>
+    <button type="button" onClick={onClick}
+      style={{ padding:'0.35rem 0.6rem', borderRadius:'0.5rem', cursor:'pointer', fontSize:'0.75rem',
+        border:`1px solid ${danger ? '#fecaca' : '#E8DFD0'}`, background: danger ? '#fff5f5' : 'white', color: danger ? '#dc2626' : '#374151' }}>
+      {children}
+    </button>
+  )
+}
 
-        {/* Profil */}
-        <div style={{ ...cardStyle, display: 'flex', flexWrap: 'wrap', gap: '1rem', alignItems: 'center', marginBottom: '1.5rem' }}>
-          <span style={{ fontSize: '2.5rem' }}>{profile.species === 'cat' ? '🐱' : '🐶'}</span>
-          <div style={{ flex: 1 }}>
-            <h1 style={{ fontFamily: 'Lora,Georgia,serif', fontSize: '1.5rem', margin: 0 }}>
-              {profile.name || 'Twój pupil'}
-            </h1>
-            <p style={{ color: '#6b7280', fontSize: '0.875rem', margin: '0.25rem 0 0' }}>
-              {profile.age_group === 'kitten' ? 'Kocię/Szczenię' : profile.age_group === 'adult' ? 'Dorosły' : 'Senior'}
-              &nbsp;·&nbsp;{profile.weight_kg} kg
-              &nbsp;·&nbsp;{profile.activity_level === 'low' ? 'Mała aktywność' : profile.activity_level === 'medium' ? 'Umiarkowana' : 'Bardzo aktywny'}
-            </p>
-          </div>
-          <div style={{ textAlign: 'right' }}>
-            <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#1b5c3a' }}>{dailyCal} kcal</div>
-            <div style={{ fontSize: '0.75rem', color: '#6b7280' }}>dziennie</div>
-          </div>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: '1.5rem', alignItems: 'start' }}>
-
-          {/* LEWA: zestaw karm */}
-          <div>
-            {/* Okres dostawy */}
-            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem', alignItems: 'center' }}>
-              <span style={{ fontSize: '0.875rem', color: '#6b7280' }}>Dostawa na:</span>
-              {PERIODS.map(p => (
-                <button key={p.id} onClick={() => setPeriod(p.id)}
-                  style={{ padding: '0.4rem 1rem', borderRadius: '2rem', border: `2px solid ${period === p.id ? '#1b5c3a' : '#E8DFD0'}`, background: period === p.id ? '#1b5c3a' : 'white', color: period === p.id ? 'white' : '#374151', cursor: 'pointer', fontWeight: period === p.id ? 600 : 400, fontSize: '0.875rem' }}>
-                  {p.label}
-                </button>
-              ))}
-            </div>
-
-            <h2 style={{ fontFamily: 'Lora,Georgia,serif', fontSize: '1.25rem', margin: '0 0 1rem' }}>
-              Twój zestaw ({box.length}/{plan.maxFoods})
-            </h2>
-
-            {box.map((item, idx) => {
-              return (
-              <div key={item.product.id} style={{ marginBottom: '0.75rem' }}>
-              <div style={{ ...cardStyle, padding: '1rem' }}>
-                <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start' }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: 'flex', gap: '0.35rem', marginBottom: '0.4rem', flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: '0.7rem', padding: '2px 8px', borderRadius: 20, background: item.product.food_type === 'wet' ? '#dbeafe' : '#fef3c7', color: item.product.food_type === 'wet' ? '#1d4ed8' : '#92400e' }}>
-                        {item.product.food_type === 'wet' ? '💧 Mokra' : '🥜 Sucha'}
-                      </span>
-                      {item.product.is_grain_free && (
-                        <span style={{ fontSize: '0.7rem', padding: '2px 8px', borderRadius: 20, background: '#d9ede2', color: '#1b5c3a' }}>🌿 Bezzbożowa</span>
-                      )}
-                    </div>
-                    <p style={{ fontSize: '0.875rem', fontWeight: 600, margin: '0 0 0.5rem', lineHeight: 1.4 }}>
-                      {item.product.nazwa}
-                    </p>
-                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
-                      {[
-                        { l: 'dziennie', v: `${item.grams_per_day}g`, bg: '#f0f7f3', c: '#1b5c3a' },
-                        { l: period === 14 ? '2 tyg.' : 'miesiąc', v: `${(item.grams_total / 1000).toFixed(1)} kg`, bg: '#f0f7f3', c: '#1b5c3a' },
-                        { l: '~opakowań', v: `${item.bags} szt.`, bg: '#fef3c7', c: '#92400e' },
-                        { l: 'koszt', v: `${item.monthly_cost} zł`, bg: '#E8DFD0', c: '#374151' },
-                      ].map(n => (
-                        <div key={n.l} style={{ background: n.bg, borderRadius: '0.5rem', padding: '0.35rem 0.65rem', textAlign: 'center' }}>
-                          <div style={{ fontSize: '0.6rem', color: '#6b7280' }}>{n.l}</div>
-                          <div style={{ fontSize: '0.85rem', fontWeight: 700, color: n.c }}>{n.v}</div>
-                        </div>
-                      ))}
-                    </div>
-                    {(item.product.reasons || []).slice(0, 2).map((r, i) => (
-                      <div key={i} style={{ fontSize: '0.75rem', color: '#1b5c3a' }}>✓ {r}</div>
-                    ))}
-
-                    {/* Suwak ilości */}
-                    <div style={{ marginTop: '0.5rem', paddingTop: '0.5rem', borderTop: '1px dashed #E8DFD0' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#6b7280', marginBottom: '0.25rem' }}>
-                        <span>Porcja dzienna:</span>
-                        <strong style={{ color: '#1b5c3a' }}>{editingGrams[item.product.id] ?? item.grams_per_day}g</strong>
-                      </div>
-                      <input type="range"
-                        min={item.product.food_type === 'dry' ? 10 : 30}
-                        max={item.product.food_type === 'dry' ? 400 : 800}
-                        step={5}
-                        value={editingGrams[item.product.id] ?? item.grams_per_day}
-                        onChange={e => {
-                          const newG = parseInt(e.target.value)
-                          setEditingGrams(prev => ({ ...prev, [item.product.id]: newG }))
-                          setBox(prev => prev.map((b, i) =>
-                            i === idx ? rebuildBoxItemWithGrams(b, newG, period) : b
-                          ))
-                        }}
-                        style={{ width: '100%', accentColor: '#1b5c3a' }}
-                      />
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.6rem', color: '#9ca3af' }}>
-                        <span>{item.product.food_type === 'dry' ? '10g' : '30g'}</span>
-                        <span>{item.product.food_type === 'dry' ? '400g' : '800g'}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', flexShrink: 0 }}>
-                    <button onClick={() => setExpandedBoxId(expandedBoxId === item.product.id ? null : item.product.id)}
-                      style={{ padding: '0.4rem 0.65rem', borderRadius: '0.5rem', border: '1px solid #E8DFD0', background: expandedBoxId === item.product.id ? '#f0f7f3' : 'white', cursor: 'pointer', fontSize: '0.75rem' }}>
-                      {expandedBoxId === item.product.id ? '▲ Ukryj' : '▼ Szczegóły'}
-                    </button>
-                    <button onClick={() => { setSwapIndex(idx); setSwapSearch(''); setExpandedId(null) }}
-                      style={{ padding: '0.4rem 0.65rem', borderRadius: '0.5rem', border: '1px solid #E8DFD0', background: 'white', cursor: 'pointer', fontSize: '0.75rem' }}>
-                      🔄 Zamień
-                    </button>
-                    <button onClick={() => removeItem(idx)}
-                      style={{ padding: '0.4rem 0.65rem', borderRadius: '0.5rem', border: '1px solid #fecaca', background: '#fff5f5', cursor: 'pointer', fontSize: '0.75rem', color: '#dc2626' }}>
-                      🗑 Usuń
-                    </button>
-                  </div>
-                </div>
-              </div>
-                {expandedBoxId === item.product.id && (
-                  <div style={{ padding: '0.75rem', background: 'white', borderRadius: '0 0 1rem 1rem', border: '1px solid #E8DFD0', borderTop: 'none', marginTop: '-1px' }}>
-                    <ProductDetails prod={item.product} dailyCal={dailyCal} />
-                  </div>
-                )}
-              </div>
-            )})}
-
-            {box.length < plan.maxFoods && (
-              <button onClick={() => { setSwapIndex(-1); setSwapSearch(''); setExpandedId(null) }}
-                style={{ width: '100%', padding: '0.875rem', borderRadius: '1rem', border: '2px dashed #1b5c3a', background: '#f0f7f3', cursor: 'pointer', color: '#1b5c3a', fontWeight: 600, fontSize: '0.9rem' }}>
-                + Dodaj karmę ({box.length}/{plan.maxFoods} slotów)
-              </button>
-            )}
-          </div>
-
-          {/* PRAWA: plan + suma */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            <div style={cardStyle}>
-              <h3 style={{ fontFamily: 'Lora,Georgia,serif', fontSize: '1.1rem', margin: '0 0 0.75rem' }}>Plan subskrypcji</h3>
-              {PLANS.map(pl => (
-                <div key={pl.id} onClick={() => changePlan(pl)}
-                  style={{ padding: '0.65rem 0.75rem', borderRadius: '0.75rem', border: `2px solid ${plan.id === pl.id ? '#1b5c3a' : '#E8DFD0'}`, background: plan.id === pl.id ? '#f0f7f3' : 'white', cursor: 'pointer', marginBottom: '0.5rem', position: 'relative' }}>
-                  {pl.featured && (
-                    <span style={{ position: 'absolute', top: -8, right: 8, background: '#C4622D', color: 'white', fontSize: '0.6rem', padding: '1px 7px', borderRadius: 20 }}>
-                      Polecany
-                    </span>
-                  )}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <span style={{ fontSize: '1.1rem' }}>{pl.emoji}</span>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 600, fontSize: '0.875rem' }}>{pl.name}</div>
-                      <div style={{ fontSize: '0.7rem', color: '#6b7280' }}>
-                        do {pl.maxFoods} karm{pl.discount > 0 ? ` · rabat ${pl.discount}%` : ''}
-                      </div>
-                    </div>
-                    {plan.id === pl.id && <span style={{ color: '#1b5c3a', fontWeight: 700 }}>✓</span>}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div style={cardStyle}>
-              <h3 style={{ fontFamily: 'Lora,Georgia,serif', fontSize: '1.1rem', margin: '0 0 0.75rem' }}>Podsumowanie</h3>
-              <div style={{ fontSize: '0.8rem', color: '#6b7280', marginBottom: '0.5rem' }}>
-                Okres: <strong style={{ color: '#374151' }}>{period === 14 ? '2 tygodnie' : 'Miesiąc'}</strong>
-              </div>
-              {box.map(item => (
-                <div key={item.product.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', padding: '0.3rem 0', borderBottom: '1px solid #f3f4f6' }}>
-                  <span style={{ color: '#6b7280', flex: 1, marginRight: '0.5rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {item.product.nazwa.substring(0, 30)}...
-                  </span>
-                  <span style={{ fontWeight: 600, flexShrink: 0 }}>{item.monthly_cost} zł</span>
-                </div>
-              ))}
-              {plan.discount > 0 && (
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', padding: '0.4rem 0', color: '#C4622D' }}>
-                  <span>Rabat {plan.discount}%</span>
-                  <span>-{totalCost - finalCost} zł</span>
-                </div>
-              )}
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700, fontSize: '1.1rem', padding: '0.65rem 0 0', borderTop: '2px solid #E8DFD0', marginTop: '0.4rem' }}>
-                <span>Razem</span>
-                <span style={{ color: '#1b5c3a' }}>{finalCost} zł</span>
-              </div>
-              <p style={{ fontSize: '0.65rem', color: '#9ca3af', margin: '0.25rem 0 0' }}>* szacunkowy koszt</p>
-              <button
-                onClick={() => {
-                  if (!profile) return
-                  savePendingOrder({
-                    plan:        plan.id,
-                    period_days: period,
-                    profile,
-                    items: box.map(b => ({
-                      product_id:    b.product.id,
-                      nazwa:         b.product.nazwa,
-                      grams_per_day: b.grams_per_day,
-                    })),
-                  })
-                  navigate('/checkout')
-                }}
-                disabled={box.length === 0}
-                className="btn-primary"
-                style={{ width: '100%', marginTop: '1rem', padding: '0.875rem', fontSize: '0.95rem', opacity: box.length === 0 ? 0.4 : 1 }}>
-                Zamów plan {plan.name} →
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* MODAL */}
-        {swapIndex !== null && (
-          <div
-            onClick={e => { if (e.target === e.currentTarget) { setSwapIndex(null); setExpandedId(null) } }}
-            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
-            <div style={{ background: 'white', borderRadius: '1.25rem', padding: '1.5rem', width: '100%', maxWidth: 580, maxHeight: '85vh', display: 'flex', flexDirection: 'column' }}>
-
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-                <h3 style={{ fontFamily: 'Lora,Georgia,serif', fontSize: '1.25rem', margin: 0 }}>
-                  {swapIndex === -1 ? 'Dodaj karmę' : 'Zamień karmę'}
-                </h3>
-                <button onClick={() => { setSwapIndex(null); setExpandedId(null) }}
-                  style={{ background: 'none', border: 'none', fontSize: '1.5rem', cursor: 'pointer', color: '#6b7280' }}>✕</button>
-              </div>
-
-              <input
-                className="input"
-                placeholder="Szukaj karmy... (np. łosoś, Schesir, mokra...)"
-                value={swapSearch}
-                onChange={e => { setSwapSearch(e.target.value); setExpandedId(null) }}
-                style={{ marginBottom: '0.5rem' }}
-                autoFocus
-              />
-              <p style={{ fontSize: '0.75rem', color: '#9ca3af', margin: '0 0 0.75rem' }}>
-                {available.length} karm dostępnych · kliknij „Szczegóły" aby zobaczyć skład i wartości odżywcze
-              </p>
-
-              <div style={{ overflowY: 'auto', flex: 1 }}>
-                {available.length === 0 && (
-                  <p style={{ textAlign: 'center', color: '#6b7280', padding: '2rem' }}>Brak wyników</p>
-                )}
-
-                {available.slice(0, 100).map((prod: any, idx: number) => (
-                  <div key={prod.id + "-" + idx}
-                    style={{ borderRadius: '0.75rem', border: `1px solid ${expandedId === prod.id ? '#1b5c3a' : '#E8DFD0'}`, marginBottom: '0.5rem', overflow: 'hidden', transition: 'border-color 0.15s' }}>
-
-                    {/* Wiersz karmy */}
-                    <div style={{ padding: '0.65rem 0.75rem' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                        <div style={{ flex: 1 }}>
-                          <p style={{ fontSize: '0.8rem', fontWeight: 600, margin: '0 0 0.3rem', lineHeight: 1.4 }}>
-                            {prod.nazwa}
-                          </p>
-                          <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }}>
-                            <span style={{ fontSize: '0.65rem', padding: '1px 7px', borderRadius: 20, background: prod.food_type === 'wet' ? '#dbeafe' : '#fef3c7', color: prod.food_type === 'wet' ? '#1d4ed8' : '#92400e' }}>
-                              {prod.food_type === 'wet' ? '💧 Mokra' : '🥜 Sucha'}
-                            </span>
-                            {prod.is_grain_free && (
-                              <span style={{ fontSize: '0.65rem', padding: '1px 7px', borderRadius: 20, background: '#d9ede2', color: '#1b5c3a' }}>🌿 Bezzbożowa</span>
-                            )}
-                            {prod.bialko && (
-                              <span style={{ fontSize: '0.65rem', padding: '1px 7px', borderRadius: 20, background: '#f3f4f6', color: '#374151' }}>
-                                Białko: {prod.bialko}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                          <div style={{ fontWeight: 700, color: '#1b5c3a', fontSize: '0.9rem' }}>
-                            {prod.cena?.toFixed(2)} zł
-                          </div>
-                          <div style={{ fontSize: '0.65rem', color: '#6b7280' }}>
-                            ~{Math.round((dailyCal / parseKcal(prod.energia, prod.food_type)) * 100)}g/dzień
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Przyciski akcji */}
-                      <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        <button
-                          onClick={() => setExpandedId(expandedId === prod.id ? null : prod.id)}
-                          style={{ flex: 1, padding: '0.35rem', borderRadius: '0.5rem', border: '1px solid #E8DFD0', background: expandedId === prod.id ? '#f0f7f3' : 'white', cursor: 'pointer', fontSize: '0.75rem', color: '#374151' }}>
-                          {expandedId === prod.id ? '▲ Ukryj' : '▼ Szczegóły'}
-                        </button>
-                        <button
-                          onClick={() => swapIndex === -1 ? addItem(prod) : swapItem(swapIndex, prod)}
-                          style={{ flex: 2, padding: '0.35rem', borderRadius: '0.5rem', border: 'none', background: '#1b5c3a', cursor: 'pointer', fontSize: '0.75rem', color: 'white', fontWeight: 600 }}>
-                          {swapIndex === -1 ? '+ Dodaj do zestawu' : '🔄 Wybierz'}
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Lazy-loaded szczegóły — ładowane dopiero po kliknięciu */}
-                    {expandedId === prod.id && (
-                      <ProductDetails prod={prod} dailyCal={dailyCal} />
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-      </div>
+function Row({ label, value, muted, accent }: { label: string; value: string; muted?: boolean; accent?: boolean }) {
+  return (
+    <div style={{ display:'flex', justifyContent:'space-between', gap:'0.75rem', fontSize:'0.8rem', padding:'0.3rem 0', borderBottom:'1px solid #f3f4f6', color: accent ? '#C4622D' : undefined }}>
+      <span style={{ minWidth:0, color: accent ? undefined : muted ? '#6b7280' : '#374151', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{label}</span>
+      <span style={{ fontWeight:600, flexShrink:0 }}>{value}</span>
     </div>
   )
 }

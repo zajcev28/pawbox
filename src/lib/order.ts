@@ -1,14 +1,17 @@
 import type { PetProfile } from '../types'
+import type { TierId } from './pricing'
 
 // Zamówienie przekazywane z /recommendations do /checkout (sessionStorage).
 export interface PendingOrderItem {
   product_id:    string
   nazwa:         string
+  cena:          number | null
+  food_type:     'dry' | 'wet'
   grams_per_day: number
 }
 
 export interface PendingOrder {
-  plan:        'starter' | 'comfort' | 'premium'
+  plan:        TierId          // status wyliczony z wartości boxa w kreatorze
   period_days: number
   profile:     PetProfile
   items:       PendingOrderItem[]
@@ -16,10 +19,6 @@ export interface PendingOrder {
 
 const KEY = 'pendingOrder'
 
-export const PLAN_RANK = { starter: 0, comfort: 1, premium: 2 } as const
-
-// Ile różnych karm na jednego pupila pozwala plan
-export const PLAN_MAX_FOODS = { starter: 1, comfort: 2, premium: 4 } as const
 
 export function savePendingOrder(order: PendingOrder) {
   sessionStorage.setItem(KEY, JSON.stringify(order))
@@ -30,7 +29,7 @@ export function loadPendingOrder(): PendingOrder | null {
     const raw = sessionStorage.getItem(KEY)
     if (!raw) return null
     const o = JSON.parse(raw) as PendingOrder
-    return o && Array.isArray(o.items) && o.profile ? o : null
+    return o && Array.isArray(o.items) && o.profile && o.items.every(i => i.food_type) ? o : null
   } catch {
     return null
   }

@@ -2,17 +2,18 @@ import { useState, useEffect } from 'react'
 import { type Session } from '@supabase/supabase-js'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { loadPendingOrder, clearOrderState, gramsPerDelivery, PLAN_RANK, type PendingOrder } from '../lib/order'
+import { loadPendingOrder, clearOrderState, gramsPerDelivery, type PendingOrder } from '../lib/order'
+import { priceLine, fmtPLN, fmtPack, TIER_BY_ID, type Tier } from '../lib/pricing'
+import { syncBoxTier } from '../lib/box'
 import type { PetProfile } from '../types'
 
 // Model: jeden box (subskrypcja) na użytkownika, każda karma przypisana do pupila.
 // Zamówienie dla kolejnego pupila dopisuje jego karmy do istniejącego boxa
 // i podmienia wyłącznie karmy TEGO pupila — karmy pozostałych pupili zostają.
 
-const PLAN_NAME = { starter: 'Podstawowy', comfort: 'Komfortowy', premium: 'Premium' }
 const FIRST_DELIVERY_IN_DAYS = 3
 
-type Result = { kind: 'new' | 'added'; petName: string; frequency: number; resumed: boolean }
+type Result = { kind: 'new' | 'added'; petName: string; frequency: number; resumed: boolean; tier: Tier | null }
 
 function addDays(days: number): string {
   const d = new Date()
@@ -117,7 +118,7 @@ export default function Checkout({ session }: { session: Session }) {
 
       // 3. Box: istniejący albo nowy
       const { data: open } = await supabase
-        .from('subscriptions').select('id, plan_type, status, delivery_frequency_days')
+        .from('subscriptions').select('id, status, delivery_frequency_days')
         .eq('user_id', userId).neq('status', 'cancelled').limit(1).maybeSingle()
 
       let subId: string
@@ -129,10 +130,9 @@ export default function Checkout({ session }: { session: Session }) {
         subId = open.id
         freq  = open.delivery_frequency_days || 30
         kind  = 'added'
-        const plan = PLAN_RANK[order.plan] > PLAN_RANK[open.plan_type as PendingOrder['plan']] ? order.plan : open.plan_type
         resumed = open.status === 'paused'
         const { error: upErr } = await supabase.from('subscriptions')
-          .update({ plan_type: plan, status: 'active' }).eq('id', subId)
+          .update({ status: 'active' }).eq('id', subId)
         if (upErr) throw new Error('Nie udało się zaktualizować boxa: ' + upErr.message)
       } else {
         freq = order.period_days
@@ -165,7 +165,10 @@ export default function Checkout({ session }: { session: Session }) {
       )
       if (insErr) throw new Error('Nie udało się zapisać karm: ' + insErr.message)
 
-      // 5. Mail tylko dla nowego boxa
+      // 5. Status z zawartości całego boxa (wszyscy pupile)
+      const pricing = await syncBoxTier(subId)
+
+      // 6. Mail tylko dla nowego boxa
       if (kind === 'new') {
         fetch('/api/send-email', {
           method: 'POST',
@@ -175,7 +178,7 @@ export default function Checkout({ session }: { session: Session }) {
       }
 
       clearOrderState()
-      setResult({ kind, petName: order.profile.name, frequency: freq, resumed })
+      setResult({ kind, petName: order.profile.name, frequency: freq, resumed, tier: pricing?.tier ?? null })
       setTimeout(() => navigate('/dashboard'), 3500)
     } catch (e) {
       console.error('Checkout error:', e)
@@ -197,6 +200,11 @@ export default function Checkout({ session }: { session: Session }) {
             ? <>Twój PawBox dla <strong>{result.petName}</strong> jest w drodze 🐾</>
             : <>Karmy dla <strong>{result.petName}</strong> dołączyły do Twojego boxa (dostawa co {result.frequency} dni).</>}
         </p>
+        {result.tier && (
+          <p style={{ color:'#1b5c3a', fontSize:'0.95rem', marginTop:'0.75rem' }}>
+            Status Twojego boxa: <strong>{result.tier.emoji} {result.tier.name}</strong>
+          </p>
+        )}
         {result.resumed && (
           <p style={{ color:'#92400e', fontSize:'0.875rem', marginTop:'0.5rem' }}>Wstrzymany box został wznowiony.</p>
         )}
@@ -219,7 +227,7 @@ export default function Checkout({ session }: { session: Session }) {
           <div>
             <div style={{ fontWeight:600 }}>{order.profile.name}</div>
             <div style={{ fontSize:'0.875rem', color:'#6b7280' }}>
-              {order.profile.weight_kg} kg · plan <strong style={{ color:'#1b5c3a' }}>{PLAN_NAME[order.plan]}</strong>
+              {order.profile.weight_kg} kg · status boxa <strong style={{ color:'#1b5c3a' }}>{TIER_BY_ID[order.plan].emoji} {TIER_BY_ID[order.plan].name}</strong>
             </div>
           </div>
         </div>
@@ -227,14 +235,20 @@ export default function Checkout({ session }: { session: Session }) {
         {/* Zestaw */}
         <div style={box}>
           <h3 style={{ fontFamily:'Lora,Georgia,serif', fontSize:'1.1rem', margin:'0 0 0.75rem' }}>🐾 Karmy w zestawie</h3>
-          {items.map(i => (
-            <div key={i.product_id} style={{ display:'flex', justifyContent:'space-between', gap:'0.75rem', fontSize:'0.85rem', padding:'0.35rem 0', borderBottom:'1px solid #f3f4f6' }}>
-              <span style={{ color:'#374151' }}>{i.nazwa}</span>
-              <span style={{ color:'#1b5c3a', fontWeight:600, whiteSpace:'nowrap' }}>
-                {i.grams_per_day} g/dzień · {(gramsPerDelivery(i.grams_per_day, frequency) / 1000).toFixed(1)} kg/dostawę
-              </span>
-            </div>
-          ))}
+          {items.map(i => {
+            const line = priceLine({ nazwa: i.nazwa, cena: i.cena, food_type: i.food_type, quantity_g: gramsPerDelivery(i.grams_per_day, frequency) })
+            return (
+              <div key={i.product_id} style={{ display:'flex', justifyContent:'space-between', gap:'0.75rem', fontSize:'0.85rem', padding:'0.45rem 0', borderBottom:'1px solid #f3f4f6', flexWrap:'wrap' }}>
+                <span style={{ color:'#374151', flex:'1 1 220px' }}>
+                  {i.nazwa}
+                  <span style={{ display:'block', fontSize:'0.75rem', color:'#6b7280' }}>
+                    {i.grams_per_day} g/dzień · {line.packs} × op. {fmtPack(line.pack.grams)}
+                  </span>
+                </span>
+                <span style={{ color:'#1b5c3a', fontWeight:600, whiteSpace:'nowrap' }}>{fmtPLN(line.price)}</span>
+              </div>
+            )
+          })}
           <p style={{ fontSize:'0.8rem', color:'#6b7280', margin:'0.75rem 0 0' }}>
             {existingBox
               ? <>Karmy dołączą do Twojego obecnego boxa, dostarczanego co <strong>{existingBox.frequency} dni</strong>. Karmy pozostałych pupili zostaną bez zmian.</>

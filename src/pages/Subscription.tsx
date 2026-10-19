@@ -2,16 +2,19 @@ import { useCallback, useEffect, useState } from 'react'
 import { type Session } from '@supabase/supabase-js'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { gramsPerDelivery, PLAN_MAX_FOODS } from '../lib/order'
+import { gramsPerDelivery } from '../lib/order'
 import { calculateDailyCalories, gramsForKcal, parseKcal, MAX_GRAMS_PER_DAY } from '../lib/recommender'
-import FoodPicker from '../components/FoodPicker'
-import type { Pet, ScoredProduct } from '../types'
+import { priceBox, fmtPLN, fmtPack } from '../lib/pricing'
+import { syncBoxTier } from '../lib/box'
+import ProductCatalog from '../components/ProductCatalog'
+import TierStatus from '../components/TierStatus'
+import type { Pet, PetProfile, ScoredProduct } from '../types'
 
 interface BoxItem {
   id: string
   pet_id: string | null
   quantity_g: number
-  products: { id: string; nazwa: string; food_type: 'dry' | 'wet'; energia: string | null } | null
+  products: { id: string; nazwa: string; cena: number | null; food_type: 'dry' | 'wet'; energia: string | null } | null
   pets: Pet | null
 }
 
@@ -27,8 +30,11 @@ interface Box {
   subscription_items: BoxItem[]
 }
 
-const PLAN_EMOJI = { starter: '🌱', comfort: '⭐', premium: '💎' }
-const PLAN_NAME  = { starter: 'Podstawowy', comfort: 'Komfortowy', premium: 'Premium' }
+const petProfile = (pet: Pet): PetProfile => ({
+  pet_id: pet.id, name: pet.name, species: pet.species, age_group: pet.age_group,
+  weight_kg: Number(pet.weight_kg) || 4, activity_level: pet.activity_level,
+  health_conditions: pet.health_conditions ?? [], allergies: pet.allergies ?? [], food_type: pet.food_type ?? 'mixed',
+})
 const FIRST_DELIVERY_IN_DAYS = 3
 
 const isoDate = (d: Date) => d.toISOString().split('T')[0]
@@ -58,7 +64,7 @@ export default function SubscriptionPage({ session }: { session: Session }) {
       .from('subscriptions')
       .select(`
         id, plan_type, status, delivery_frequency_days, next_delivery_date,
-        subscription_items ( id, pet_id, quantity_g, products ( id, nazwa, food_type, energia ), pets ( * ) )
+        subscription_items ( id, pet_id, quantity_g, products ( id, nazwa, cena, food_type, energia ), pets ( * ) )
       `)
       .eq('user_id', session.user.id)
       .neq('status', 'cancelled')
@@ -90,6 +96,7 @@ export default function SubscriptionPage({ session }: { session: Session }) {
     } catch {
       setError('Coś poszło nie tak — spróbuj ponownie.')
     }
+    if (box) await syncBoxTier(box.id)   // status wynika z zawartości boxa
     apply(await fetchBox())
     setBusy(false)
   }
@@ -120,7 +127,10 @@ export default function SubscriptionPage({ session }: { session: Session }) {
     if (!groups.has(key)) groups.set(key, { pet: it.pets, items: [] })
     groups.get(key)!.items.push(it)
   }
-  const totalGrams = box.subscription_items.reduce((s, i) => s + (i.quantity_g || 0), 0)
+  const pricing = priceBox(box.subscription_items.filter(i => i.products).map(i => ({
+    nazwa: i.products!.nazwa, cena: i.products!.cena, food_type: i.products!.food_type, quantity_g: i.quantity_g,
+  })), box.delivery_frequency_days || 30)
+  const lineFor = new Map(box.subscription_items.filter(i => i.products).map((i, k) => [i.id, pricing.lines[k]]))
 
   const nextDates = (() => {
     if (!box.next_delivery_date || box.status !== 'active') return []
@@ -226,8 +236,6 @@ export default function SubscriptionPage({ session }: { session: Session }) {
     run(async () => supabase.from('subscription_items').delete().eq('subscription_id', box.id).eq('pet_id', petId))
   }
 
-  const maxFoods = PLAN_MAX_FOODS[box.plan_type]
-
   const statusBadge = box.status === 'active'
     ? { text:'Aktywna', bg:'#d9ede2', fg:'#1b5c3a' }
     : { text:'Wstrzymana', bg:'#fef3c7', fg:'#92400e' }
@@ -243,27 +251,31 @@ export default function SubscriptionPage({ session }: { session: Session }) {
           </div>
         )}
 
-        {/* Plan i status */}
-        <div className="card" style={{ marginBottom:'1rem' }}>
-          <div style={{ display:'flex', alignItems:'center', gap:'1rem', flexWrap:'wrap' }}>
-            <span style={{ fontSize:'2.5rem' }}>{PLAN_EMOJI[box.plan_type]}</span>
-            <div style={{ flex:1, minWidth:160 }}>
-              <h2 style={{ fontFamily:'Lora,Georgia,serif', margin:0 }}>Plan {PLAN_NAME[box.plan_type]}</h2>
-              <div style={{ display:'flex', gap:'0.5rem', alignItems:'center', marginTop:'0.35rem', flexWrap:'wrap' }}>
-                <span style={{ fontSize:'0.75rem', padding:'2px 10px', borderRadius:20, background:statusBadge.bg, color:statusBadge.fg }}>
-                  {statusBadge.text}
-                </span>
-                <span style={{ fontSize:'0.8rem', color:'#6b7280' }}>
-                  {box.subscription_items.length} karm · {fmtGrams(totalGrams)} na dostawę
-                </span>
-              </div>
-            </div>
+        {/* Status i koszt */}
+        <div className="card" style={{ marginBottom:'1rem', display:'flex', flexDirection:'column', gap:'0.9rem' }}>
+          <div style={{ display:'flex', alignItems:'center', gap:'0.75rem', flexWrap:'wrap' }}>
+            <span style={{ fontSize:'0.75rem', padding:'2px 10px', borderRadius:20, background:statusBadge.bg, color:statusBadge.fg }}>
+              {statusBadge.text}
+            </span>
+            <span style={{ fontSize:'0.85rem', color:'#6b7280', flex:1 }}>
+              {box.subscription_items.length} karm · co {box.delivery_frequency_days} dni
+            </span>
             {box.next_delivery_date && box.status === 'active' && (
-              <div style={{ textAlign:'right' }}>
-                <div style={{ fontSize:'0.75rem', color:'#6b7280' }}>Następna dostawa</div>
-                <div style={{ fontWeight:700, color:'#1b5c3a' }}>{fmtDate(box.next_delivery_date)}</div>
-              </div>
+              <span style={{ fontSize:'0.85rem', color:'#374151' }}>
+                Następna dostawa: <strong style={{ color:'#1b5c3a' }}>{fmtDate(box.next_delivery_date)}</strong>
+              </span>
             )}
+          </div>
+          <TierStatus pricing={pricing} />
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', flexWrap:'wrap', gap:'0.5rem' }}>
+            <span style={{ fontSize:'0.85rem', color:'#6b7280' }}>
+              Karmy {fmtPLN(pricing.foodTotal)}
+              {pricing.discountPLN > 0 && <> · rabat −{fmtPLN(pricing.discountPLN)}</>}
+              {' · '}dostawa {pricing.shipping === 0 ? 'gratis' : fmtPLN(pricing.shipping)}
+            </span>
+            <span style={{ fontSize:'1.1rem', fontWeight:700, color:'#1b5c3a' }}>
+              {fmtPLN(pricing.total)} <span style={{ fontSize:'0.75rem', color:'#6b7280', fontWeight:400 }}>/ dostawa · ≈ {fmtPLN(pricing.totalMonthly)} / mies.</span>
+            </span>
           </div>
         </div>
 
@@ -311,7 +323,7 @@ export default function SubscriptionPage({ session }: { session: Session }) {
                           </span>
                         ) : (
                           <>
-                            {daily} g/dzień · {fmtGrams(it.quantity_g || 0)} na dostawę{' '}
+                            {daily} g/dzień · {lineFor.get(it.id) ? `${lineFor.get(it.id)!.packs} × op. ${fmtPack(lineFor.get(it.id)!.pack.grams)} · ${fmtPLN(lineFor.get(it.id)!.price)}` : fmtGrams(it.quantity_g || 0)}{' '}
                             <button type="button" disabled={busy} onClick={() => setEditing({ id: it.id, value: String(daily) })} style={linkBtn('#1b5c3a')}>
                               zmień porcję
                             </button>
@@ -332,16 +344,11 @@ export default function SubscriptionPage({ session }: { session: Session }) {
                   </div>
                 )
               })}
-              {pet && items.length < maxFoods && (
+              {pet && (
                 <button type="button" disabled={busy} onClick={() => setPicker({ mode:'add', pet, items })}
                   style={{ ...linkBtn('#1b5c3a'), marginLeft:'2rem', marginTop:'0.25rem', fontSize:'0.85rem' }}>
-                  + Dodaj karmę dla {pet.name} ({items.length}/{maxFoods})
+                  + Dodaj karmę dla {pet.name}
                 </button>
-              )}
-              {pet && items.length >= maxFoods && box.plan_type !== 'premium' && (
-                <p style={{ margin:'0.25rem 0 0 2rem', fontSize:'0.75rem', color:'#9ca3af' }}>
-                  Plan {PLAN_NAME[box.plan_type]} pozwala na {maxFoods} {maxFoods === 1 ? 'karmę' : 'karmy'} na pupila.
-                </p>
               )}
             </div>
           ))}
@@ -403,8 +410,8 @@ export default function SubscriptionPage({ session }: { session: Session }) {
       </div>
 
       {picker && (
-        <FoodPicker
-          pet={picker.pet}
+        <ProductCatalog
+          profile={petProfile(picker.pet)}
           title={picker.mode === 'swap'
             ? `Zamień: ${picker.item.products?.nazwa ?? 'karmę'}`
             : `Dodaj karmę dla ${picker.pet.name}`}

@@ -28,6 +28,7 @@ export default function Quiz() {
   const [searchParams] = useSearchParams()
   const petParam = searchParams.get('pet')
   const [showAuth, setShowAuth] = useState(false)
+  const [mode, setMode] = useState<'choose' | 'quiz' | 'manual'>(petParam ? 'quiz' : 'choose')
   const [p, setP] = useState<Partial<PetProfile>>({
     name:'', species:'cat', age_group:'adult', weight_kg:4,
     activity_level:'medium', health_conditions:[], allergies:[], food_type:'mixed'
@@ -68,14 +69,127 @@ export default function Quiz() {
     borderRadius:'0.75rem', padding:'1rem', cursor:'pointer', textAlign:'left', width:'100%',
   })
 
-  const handleFinish = () => {
-    sessionStorage.setItem('quizProfile', JSON.stringify(p))
+  const handleFinish = (chosen: 'quiz' | 'manual' = 'quiz') => {
+    const profile: Partial<PetProfile> = chosen === 'manual'
+      // „Wiem, czego chcę”: bez propozycji, profil tylko do wyliczenia porcji
+      ? { ...p, mode: 'manual', activity_level: p.activity_level || 'medium', health_conditions: [], allergies: [], food_type: 'mixed' }
+      : { ...p, mode: 'quiz' }
+    sessionStorage.setItem('quizProfile', JSON.stringify(profile))
     if (session) {
       navigate('/recommendations')
     } else {
       setShowAuth(true)
     }
   }
+
+  const authModal = showAuth ? (
+        <div onClick={e => { if (e.target === e.currentTarget) setShowAuth(false) }}
+          style={{position:'fixed', inset:0, background:'rgba(0,0,0,0.5)', zIndex:100, display:'flex', alignItems:'center', justifyContent:'center', padding:'1rem'}}>
+          <div style={{background:'white', borderRadius:'1.25rem', padding:'2rem', width:'100%', maxWidth:420}}>
+
+            <div style={{textAlign:'center', marginBottom:'1.5rem'}}>
+              <h2 style={{fontFamily:'Lora,Georgia,serif', fontSize:'1.5rem', margin:'0 0 0.5rem'}}>🐾 Prawie gotowe!</h2>
+              <p style={{color:'#6b7280', fontSize:'0.875rem', margin:0}}>
+                Załóż konto żeby zobaczyć rekomendacje i zarządzać subskrypcją
+              </p>
+            </div>
+
+            <AuthForm initialTab="register"
+              onSignedIn={() => { setShowAuth(false); navigate('/recommendations') }}
+              submitLabel={{ register:'Utwórz konto i kontynuuj →', login:'Zaloguj się i kontynuuj →' }} />
+
+            <button onClick={() => setShowAuth(false)}
+              style={{display:'block', margin:'0.75rem auto 0', background:'none', border:'none', color:'#9ca3af', fontSize:'0.8rem', cursor:'pointer'}}>
+              ← Wróć do quizu
+            </button>
+          </div>
+        </div>
+  ) : null
+
+  const speciesPicker = (
+    <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'1rem', marginBottom:'1.25rem'}}>
+      {(['cat','dog'] as const).map(s => (
+        <button key={s} type="button" onClick={()=>upd('species',s)} style={{...sel(p.species===s), textAlign:'center', padding:'1.25rem'}}>
+          <span style={{fontSize:'2.25rem', display:'block', marginBottom:'0.4rem'}}>{s==='cat'?'🐱':'🐶'}</span>
+          <span style={{fontWeight:600}}>{s==='cat'?'Kot':'Pies'}</span>
+        </button>
+      ))}
+    </div>
+  )
+
+  const agePicker = (
+    <div style={{display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:'0.75rem', marginBottom:'1.25rem'}}>
+      {[{v:'kitten',l:p.species==='dog'?'Szczenię':'Kocię',s:'< 1 rok'},{v:'adult',l:'Dorosły',s:'1–7 lat'},{v:'senior',l:'Senior',s:'7+ lat'}].map(o=>(
+        <button key={o.v} type="button" onClick={()=>upd('age_group',o.v)} style={{...sel(p.age_group===o.v), textAlign:'center'}}>
+          <div style={{fontWeight:600}}>{o.l}</div>
+          <div style={{fontSize:'0.75rem', color:'#6b7280'}}>{o.s}</div>
+        </button>
+      ))}
+    </div>
+  )
+
+  const weightPicker = (
+    <>
+      <label style={{display:'block', fontSize:'0.875rem', marginBottom:'0.5rem'}}>
+        Waga: <strong style={{color:'#1b5c3a'}}>{p.weight_kg} kg</strong>
+      </label>
+      <input type="range" min="0.5" max="80" step="0.5" value={p.weight_kg}
+        onChange={e=>upd('weight_kg',parseFloat(e.target.value))} style={{width:'100%', accentColor:'#1b5c3a'}} aria-label="Waga pupila" />
+      <div style={{display:'flex', justifyContent:'space-between', fontSize:'0.75rem', color:'#9ca3af'}}>
+        <span>0.5 kg</span><span>80 kg</span>
+      </div>
+    </>
+  )
+
+  // ── Start: dwie ścieżki ────────────────────────────────────────────────
+  if (mode === 'choose') return (
+    <div style={{minHeight:'100vh', background:'#FAF6EF', padding:'3rem 1rem'}}>
+      <div style={{maxWidth:640, margin:'0 auto'}}>
+        <h1 style={{fontFamily:'Lora,Georgia,serif', fontSize:'2rem', textAlign:'center', margin:'0 0 0.5rem'}}>Jak chcesz zacząć?</h1>
+        <p style={{textAlign:'center', color:'#6b7280', margin:'0 0 2rem'}}>W obu przypadkach na końcu sam decydujesz, co trafi do boxa.</p>
+        <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(240px,1fr))', gap:'1rem'}}>
+          {[
+            { m:'quiz' as const,   icon:'🔍', title:'Pomóż mi dobrać', text:'5 krótkich pytań o pupila — zaproponujemy karmy i porcje, a Ty je dopasujesz.', cta:'Zacznij quiz →' },
+            { m:'manual' as const, icon:'🛒', title:'Wiem, czego chcę', text:'Od razu do katalogu. Podaj tylko gatunek i wagę, żebyśmy policzyli porcje.', cta:'Do katalogu →' },
+          ].map(o => (
+            <button key={o.m} type="button" onClick={() => setMode(o.m)}
+              style={{...cardStyle, padding:'1.5rem', textAlign:'left', cursor:'pointer', display:'flex', flexDirection:'column', gap:'0.5rem'}}>
+              <span style={{fontSize:'2.25rem'}}>{o.icon}</span>
+              <span style={{fontFamily:'Lora,Georgia,serif', fontSize:'1.25rem', fontWeight:700, color:'#144830'}}>{o.title}</span>
+              <span style={{fontSize:'0.875rem', color:'#6b7280', lineHeight:1.5, flex:1}}>{o.text}</span>
+              <span style={{color:'#1b5c3a', fontWeight:600, fontSize:'0.9rem'}}>{o.cta}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      {authModal}
+    </div>
+  )
+
+  // ── „Wiem, czego chcę” ─────────────────────────────────────────────────
+  if (mode === 'manual') return (
+    <div style={{minHeight:'100vh', background:'#FAF6EF', padding:'3rem 1rem'}}>
+      <div style={{maxWidth:560, margin:'0 auto'}}>
+        <div style={cardStyle}>
+          <h2 style={{fontFamily:'Lora,Georgia,serif', fontSize:'1.6rem', margin:'0 0 0.4rem'}}>Dla kogo box?</h2>
+          <p style={{fontSize:'0.875rem', color:'#6b7280', margin:'0 0 1.25rem'}}>Tyle wystarczy, żeby policzyć porcje. Karmy wybierzesz sam.</p>
+          {speciesPicker}
+          <label style={{display:'block', fontSize:'0.875rem', marginBottom:'0.5rem'}}>Imię pupila</label>
+          <input className="input" value={p.name} onChange={e=>upd('name',e.target.value)} placeholder="np. Mruczek, Burek..." style={{marginBottom:'1.25rem'}} />
+          {agePicker}
+          {weightPicker}
+          <div style={{display:'flex', justifyContent:'space-between', marginTop:'2rem', gap:'0.75rem'}}>
+            <button type="button" className="btn-secondary" onClick={() => setMode('choose')}>← Wróć</button>
+            <button type="button" className="btn-primary" disabled={!p.name?.trim()} onClick={() => handleFinish('manual')}
+              style={{opacity: p.name?.trim() ? 1 : 0.5}}>
+              Do katalogu →
+            </button>
+          </div>
+        </div>
+      </div>
+      {authModal}
+    </div>
+  )
 
   return (
     <div style={{minHeight:'100vh', background:'#FAF6EF', padding:'3rem 1rem'}}>
@@ -96,14 +210,7 @@ export default function Quiz() {
           {step===1 && (
             <div>
               <h2 style={{fontFamily:'Lora,Georgia,serif', fontSize:'1.75rem', marginBottom:'1.5rem'}}>Powiedz nam o swoim pupilu</h2>
-              <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'1rem', marginBottom:'1.5rem'}}>
-                {(['cat','dog'] as const).map(s => (
-                  <button key={s} onClick={()=>upd('species',s)} style={{...sel(p.species===s), textAlign:'center', padding:'1.5rem'}}>
-                    <span style={{fontSize:'2.5rem', display:'block', marginBottom:'0.5rem'}}>{s==='cat'?'🐱':'🐶'}</span>
-                    <span style={{fontWeight:600}}>{s==='cat'?'Kot':'Pies'}</span>
-                  </button>
-                ))}
-              </div>
+              {speciesPicker}
               <label style={{display:'block', fontSize:'0.875rem', marginBottom:'0.5rem'}}>Imię pupila</label>
               <input className="input" value={p.name} onChange={e=>upd('name',e.target.value)} placeholder="np. Mruczek, Burek..." />
             </div>
@@ -113,22 +220,8 @@ export default function Quiz() {
           {step===2 && (
             <div>
               <h2 style={{fontFamily:'Lora,Georgia,serif', fontSize:'1.75rem', marginBottom:'1.5rem'}}>Wiek i waga {p.name||'pupila'}</h2>
-              <div style={{display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:'0.75rem', marginBottom:'1.5rem'}}>
-                {[{v:'kitten',l:p.species==='dog'?'Szczenię':'Kocię',s:'< 1 rok'},{v:'adult',l:'Dorosły',s:'1–7 lat'},{v:'senior',l:'Senior',s:'7+ lat'}].map(o=>(
-                  <button key={o.v} onClick={()=>upd('age_group',o.v)} style={{...sel(p.age_group===o.v), textAlign:'center'}}>
-                    <div style={{fontWeight:600}}>{o.l}</div>
-                    <div style={{fontSize:'0.75rem', color:'#6b7280'}}>{o.s}</div>
-                  </button>
-                ))}
-              </div>
-              <label style={{display:'block', fontSize:'0.875rem', marginBottom:'0.5rem'}}>
-                Waga: <strong style={{color:'#1b5c3a'}}>{p.weight_kg} kg</strong>
-              </label>
-              <input type="range" min="0.5" max="80" step="0.5" value={p.weight_kg}
-                onChange={e=>upd('weight_kg',parseFloat(e.target.value))} style={{width:'100%', accentColor:'#1b5c3a'}} />
-              <div style={{display:'flex', justifyContent:'space-between', fontSize:'0.75rem', color:'#9ca3af'}}>
-                <span>0.5 kg</span><span>80 kg</span>
-              </div>
+              {agePicker}
+              {weightPicker}
             </div>
           )}
 
@@ -206,8 +299,8 @@ export default function Quiz() {
 
           {/* Nawigacja */}
           <div style={{display:'flex', justifyContent:'space-between', marginTop:'2rem'}}>
-            <button onClick={()=>setStep(s=>s-1)} disabled={step===1}
-              className="btn-secondary" style={{opacity:step===1?0.3:1}}>
+            <button onClick={() => step === 1 ? setMode('choose') : setStep(s => s-1)} disabled={step===1 && !!petParam}
+              className="btn-secondary" style={{opacity:step===1 && petParam ? 0.3 : 1}}>
               ← Wróć
             </button>
             <button className="btn-primary" onClick={() => {
@@ -220,30 +313,7 @@ export default function Quiz() {
         </div>
       </div>
 
-      {/* Modal auth */}
-      {showAuth && (
-        <div onClick={e => { if (e.target === e.currentTarget) setShowAuth(false) }}
-          style={{position:'fixed', inset:0, background:'rgba(0,0,0,0.5)', zIndex:100, display:'flex', alignItems:'center', justifyContent:'center', padding:'1rem'}}>
-          <div style={{background:'white', borderRadius:'1.25rem', padding:'2rem', width:'100%', maxWidth:420}}>
-
-            <div style={{textAlign:'center', marginBottom:'1.5rem'}}>
-              <h2 style={{fontFamily:'Lora,Georgia,serif', fontSize:'1.5rem', margin:'0 0 0.5rem'}}>🐾 Prawie gotowe!</h2>
-              <p style={{color:'#6b7280', fontSize:'0.875rem', margin:0}}>
-                Załóż konto żeby zobaczyć rekomendacje i zarządzać subskrypcją
-              </p>
-            </div>
-
-            <AuthForm initialTab="register"
-              onSignedIn={() => { setShowAuth(false); navigate('/recommendations') }}
-              submitLabel={{ register:'Utwórz konto i kontynuuj →', login:'Zaloguj się i kontynuuj →' }} />
-
-            <button onClick={() => setShowAuth(false)}
-              style={{display:'block', margin:'0.75rem auto 0', background:'none', border:'none', color:'#9ca3af', fontSize:'0.8rem', cursor:'pointer'}}>
-              ← Wróć do quizu
-            </button>
-          </div>
-        </div>
-      )}
+      {authModal}
     </div>
   )
 }

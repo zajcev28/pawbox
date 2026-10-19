@@ -123,7 +123,7 @@ export default function Dashboard({ session }: { session: Session }) {
                     <div style={{ flex:1, minWidth:180 }}>
                       <div style={{ display:'flex', alignItems:'center', gap:'0.5rem', flexWrap:'wrap' }}>
                         <span style={{ fontWeight:600, fontSize:'1rem' }}>
-                          {PLAN_NAME[sub.plan_type]}
+                          Status {PLAN_NAME[sub.plan_type]}
                         </span>
                         {/* Pupile w boxie */}
                         {sub.box_pets.map(bp => (
