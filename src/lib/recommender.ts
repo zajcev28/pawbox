@@ -7,14 +7,13 @@ export function calculateDailyCalories(
   species: 'cat' | 'dog'
 ): number {
   const rer = 70 * Math.pow(weight, 0.75)
-  const mult: Record<string, any> = {
+  type Mult = { kitten: number; senior: number; adult: Record<'low' | 'medium' | 'high', number> }
+  const mult: Record<'cat' | 'dog', Mult> = {
     cat: { kitten: 2.5, adult: { low: 1.0, medium: 1.2, high: 1.4 }, senior: 1.1 },
     dog: { kitten: 3.0, adult: { low: 1.4, medium: 1.6, high: 1.8 }, senior: 1.2 },
   }
   const m = mult[species]
-  const multiplier = ageGroup === 'adult'
-    ? m.adult[activityLevel]
-    : m[ageGroup] as number
+  const multiplier = ageGroup === 'adult' ? m.adult[activityLevel] : m[ageGroup]
   return Math.round(rer * multiplier)
 }
 
@@ -30,7 +29,7 @@ function scoreProduct(product: Product, profile: PetProfile) {
   const warnings: string[] = []
   const nazwa = product.nazwa.toLowerCase()
   const sklad = (product.sklad || '').toLowerCase()
-  const opis = ((product as any).opis || '').toLowerCase()
+  const opis = (product.opis || '').toLowerCase()
   const fullText = nazwa + ' ' + sklad + ' ' + opis
 
   // Wiek
@@ -125,13 +124,42 @@ function calcMonthly(product: Product, dailyCal: number) {
   return { daily_grams: dailyGrams, monthly_price_est: estMonthlyCost }
 }
 
-export function getRecommendations(products: Product[], profile: PetProfile): ScoredProduct[] {
+// Kaloryczność karmy w kcal/100 g (pole „energia” bywa w kcal/kg albo kcal/100 g)
+export function parseKcal(energia: string | null, foodType: 'dry' | 'wet'): number {
+  if (energia) {
+    const s = energia.toLowerCase()
+    const m = energia.match(/(\d+)/)
+    if (m) {
+      const v = parseInt(m[1])
+      if (s.includes('100g') || s.includes('100 g')) return v
+      if (s.includes('/kg') || s.includes('kg')) return Math.round(v / 10)
+      if (v > 800) return Math.round(v / 10)   // >800 to prawie na pewno kcal/kg
+      if (v > 0) return v
+    }
+  }
+  return foodType === 'dry' ? 350 : 85
+}
+
+export const MAX_GRAMS_PER_DAY = 1500
+
+// Ile gramów dziennie daje zadaną liczbę kcal
+export function gramsForKcal(kcal: number, energia: string | null, foodType: 'dry' | 'wet'): number {
+  const g = Math.round((kcal / parseKcal(energia, foodType)) * 100)
+  return Math.min(MAX_GRAMS_PER_DAY, Math.max(1, g))
+}
+
+// Wszystkie pasujące karmy (bez alergenów i złego typu), od najlepiej dopasowanej
+export function rankProducts(products: Product[], profile: PetProfile): ScoredProduct[] {
   const dailyCal = calculateDailyCalories(profile.weight_kg, profile.age_group, profile.activity_level, profile.species)
-  const filtered = products.filter(p => p.species === profile.species || p.species === 'both')
-  const scored = filtered
+  return products
+    .filter(p => p.species === profile.species || p.species === 'both')
     .map(p => { const s = scoreProduct(p, profile); const m = calcMonthly(p, dailyCal); return {...p, ...s, ...m} })
     .filter(p => p.score > 0)
     .sort((a, b) => b.score - a.score)
+}
+
+export function getRecommendations(products: Product[], profile: PetProfile): ScoredProduct[] {
+  const scored = rankProducts(products, profile)
 
   if (profile.food_type !== 'mixed') return scored.slice(0, 8)
   const result: ScoredProduct[] = []

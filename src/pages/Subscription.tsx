@@ -2,15 +2,21 @@ import { useCallback, useEffect, useState } from 'react'
 import { type Session } from '@supabase/supabase-js'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { gramsPerDelivery } from '../lib/order'
+import { gramsPerDelivery, PLAN_MAX_FOODS } from '../lib/order'
+import { calculateDailyCalories, gramsForKcal, parseKcal, MAX_GRAMS_PER_DAY } from '../lib/recommender'
+import FoodPicker from '../components/FoodPicker'
+import type { Pet, ScoredProduct } from '../types'
 
 interface BoxItem {
   id: string
   pet_id: string | null
   quantity_g: number
-  products: { nazwa: string; food_type: 'dry' | 'wet' } | null
-  pets: { id: string; name: string; species: 'cat' | 'dog' } | null
+  products: { id: string; nazwa: string; food_type: 'dry' | 'wet'; energia: string | null } | null
+  pets: Pet | null
 }
+
+// Okno wyboru: zamiana konkretnej karmy albo dodanie nowej dla pupila
+type PickerState = { mode: 'swap'; item: BoxItem; pet: Pet } | { mode: 'add'; pet: Pet; items: BoxItem[] }
 
 interface Box {
   id: string
@@ -30,6 +36,8 @@ const addDays = (n: number) => { const d = new Date(); d.setDate(d.getDate() + n
 const fmtDate = (s: string) => new Date(s).toLocaleDateString('pl-PL', { day:'numeric', month:'long', year:'numeric' })
 const fmtGrams = (g: number) => g >= 1000 ? `${(g / 1000).toLocaleString('pl-PL', { maximumFractionDigits: 1 })} kg` : `${g} g`
 
+const kcalPer100 = (it: BoxItem) => parseKcal(it.products?.energia ?? null, it.products?.food_type ?? 'dry')
+
 function isPastOrToday(dateStr: string | null) {
   if (!dateStr) return true
   const today = new Date(); today.setHours(0, 0, 0, 0)
@@ -42,13 +50,15 @@ export default function SubscriptionPage({ session }: { session: Session }) {
   const [busy, setBusy]       = useState(false)
   const [error, setError]     = useState('')
   const [freq, setFreq]       = useState(30)
+  const [picker, setPicker]   = useState<PickerState | null>(null)
+  const [editing, setEditing] = useState<{ id: string; value: string } | null>(null)
 
   const fetchBox = useCallback(async () => {
     const { data, error } = await supabase
       .from('subscriptions')
       .select(`
         id, plan_type, status, delivery_frequency_days, next_delivery_date,
-        subscription_items ( id, pet_id, quantity_g, products ( nazwa, food_type ), pets ( id, name, species ) )
+        subscription_items ( id, pet_id, quantity_g, products ( id, nazwa, food_type, energia ), pets ( * ) )
       `)
       .eq('user_id', session.user.id)
       .neq('status', 'cancelled')
@@ -150,15 +160,73 @@ export default function SubscriptionPage({ session }: { session: Session }) {
     run(async () => supabase.from('subscriptions').update({ status:'cancelled' }).eq('id', box.id))
   }
 
-  const removeItem = (it: BoxItem) => {
-    if (!confirm(`Usunąć „${it.products?.nazwa ?? 'tę karmę'}” z boxa?`)) return
-    run(async () => supabase.from('subscription_items').delete().eq('id', it.id))
+  // ── Karmy ────────────────────────────────────────────────────────────────
+  // Porcje liczymy w kaloriach: przy zamianie nowa karma przejmuje kalorie starej,
+  // przy dodaniu/usunięciu pozostałe porcje są skalowane, żeby dzienna suma się nie zmieniła.
+  const days = box.delivery_frequency_days || 30
+  const gpd  = (it: BoxItem) => (it.quantity_g || 0) / days
+  const kcalOf = (it: BoxItem) => gpd(it) * kcalPer100(it) / 100
+  const qty = (gramsPerDay: number) => gramsPerDelivery(Math.min(MAX_GRAMS_PER_DAY, gramsPerDay), days)
+
+  const updateQty = (id: string, quantity_g: number) =>
+    supabase.from('subscription_items').update({ quantity_g }).eq('id', id)
+
+  const firstError = (rs: { error: unknown }[]) => ({ error: rs.find(r => r.error)?.error ?? null })
+
+  const swapItem = (it: BoxItem, p: ScoredProduct) => run(async () => {
+    const kcal = kcalOf(it)
+    const newGpd = kcal > 0 ? gramsForKcal(kcal, p.energia, p.food_type) : p.daily_grams
+    return supabase.from('subscription_items')
+      .update({ product_id: p.id, quantity_g: qty(newGpd) })
+      .eq('id', it.id)
+  })
+
+  const addItem = (pet: Pet, items: BoxItem[], p: ScoredProduct) => run(async () => {
+    const n = items.length
+    const total = items.reduce((s, i) => s + kcalOf(i), 0)
+      || calculateDailyCalories(Number(pet.weight_kg) || 4, pet.age_group, pet.activity_level, pet.species)
+    const share = total / (n + 1)
+    const scaled = await Promise.all(items.map(i => updateQty(i.id, qty(gpd(i) * n / (n + 1)))))
+    const ins = await supabase.from('subscription_items').insert({
+      subscription_id: box.id, product_id: p.id, pet_id: pet.id, is_active: true,
+      quantity_g: qty(gramsForKcal(share, p.energia, p.food_type)),
+    })
+    return firstError([...scaled, ins])
+  })
+
+  const removeItem = (it: BoxItem, siblings: BoxItem[]) => {
+    const rest = siblings.filter(s => s.id !== it.id)
+    const msg = rest.length
+      ? `Usunąć „${it.products?.nazwa ?? 'tę karmę'}”? Porcje pozostałych karm zostaną zwiększone.`
+      : `Usunąć „${it.products?.nazwa ?? 'tę karmę'}” z boxa?`
+    if (!confirm(msg)) return
+    run(async () => {
+      const del = await supabase.from('subscription_items').delete().eq('id', it.id)
+      if (del.error || rest.length === 0) return del
+      const restKcal = rest.reduce((s, i) => s + kcalOf(i), 0)
+      const factor = restKcal > 0 ? (restKcal + kcalOf(it)) / restKcal : 1
+      return firstError(await Promise.all(rest.map(i => updateQty(i.id, qty(gpd(i) * factor)))))
+    })
+  }
+
+  const saveGrams = () => {
+    if (!editing) return
+    const g = Math.round(Number(editing.value.replace(',', '.')))
+    if (!Number.isFinite(g) || g < 1 || g > MAX_GRAMS_PER_DAY) {
+      setError(`Porcja musi mieć od 1 do ${MAX_GRAMS_PER_DAY} g dziennie.`)
+      return
+    }
+    const id = editing.id
+    setEditing(null)
+    run(async () => updateQty(id, qty(g)))
   }
 
   const removePet = (petId: string, name: string) => {
     if (!confirm(`Usunąć wszystkie karmy dla: ${name}?`)) return
     run(async () => supabase.from('subscription_items').delete().eq('subscription_id', box.id).eq('pet_id', petId))
   }
+
+  const maxFoods = PLAN_MAX_FOODS[box.plan_type]
 
   const statusBadge = box.status === 'active'
     ? { text:'Aktywna', bg:'#d9ede2', fg:'#1b5c3a' }
@@ -214,7 +282,7 @@ export default function SubscriptionPage({ session }: { session: Session }) {
                 <strong style={{ flex:1 }}>{pet?.name ?? 'Pupil nieprzypisany'}</strong>
                 {pet && (
                   <>
-                    <Link to={`/quiz?pet=${pet.id}`} style={{ fontSize:'0.8rem', color:'#1b5c3a' }}>Zmień zestaw</Link>
+                    <Link to={`/quiz?pet=${pet.id}`} style={{ fontSize:'0.8rem', color:'#1b5c3a' }}>Nowy quiz</Link>
                     <button type="button" disabled={busy} onClick={() => removePet(pet.id, pet.name)}
                       style={{ fontSize:'0.8rem', color:'#9ca3af', background:'none', border:'none', cursor:'pointer', padding:0 }}>
                       Usuń z boxa
@@ -222,17 +290,59 @@ export default function SubscriptionPage({ session }: { session: Session }) {
                   </>
                 )}
               </div>
-              {items.map(it => (
-                <div key={it.id} style={{ display:'flex', alignItems:'center', gap:'0.75rem', padding:'0.45rem 0 0.45rem 2rem', fontSize:'0.875rem' }}>
-                  <span title={it.products?.food_type === 'wet' ? 'Mokra' : 'Sucha'}>{it.products?.food_type === 'wet' ? '💧' : '🥜'}</span>
-                  <span style={{ flex:1, color:'#374151' }}>{it.products?.nazwa ?? 'Karma niedostępna'}</span>
-                  <span style={{ color:'#6b7280', whiteSpace:'nowrap' }}>{fmtGrams(it.quantity_g || 0)}</span>
-                  <button type="button" disabled={busy} onClick={() => removeItem(it)} aria-label="Usuń karmę"
-                    style={{ background:'none', border:'none', color:'#9ca3af', cursor:'pointer', fontSize:'1rem', padding:'0 0.25rem' }}>
-                    ✕
-                  </button>
-                </div>
-              ))}
+              {items.map(it => {
+                const daily = Math.round(gpd(it))
+                const isEditing = editing?.id === it.id
+                return (
+                  <div key={it.id} style={{ display:'flex', alignItems:'center', gap:'0.6rem', padding:'0.55rem 0 0.55rem 2rem', fontSize:'0.875rem', flexWrap:'wrap' }}>
+                    <span title={it.products?.food_type === 'wet' ? 'Mokra' : 'Sucha'}>{it.products?.food_type === 'wet' ? '💧' : '🥜'}</span>
+                    <span style={{ flex:'1 1 200px', color:'#374151', minWidth:0 }}>
+                      {it.products?.nazwa ?? 'Karma niedostępna'}
+                      <span style={{ display:'block', fontSize:'0.75rem', color:'#6b7280' }}>
+                        {isEditing ? (
+                          <span style={{ display:'inline-flex', gap:'0.35rem', alignItems:'center' }}>
+                            <input type="number" min={1} max={MAX_GRAMS_PER_DAY} value={editing.value} autoFocus
+                              onChange={e => setEditing({ id: it.id, value: e.target.value })}
+                              onKeyDown={e => { if (e.key === 'Enter') saveGrams(); if (e.key === 'Escape') setEditing(null) }}
+                              style={{ width:70, padding:'0.15rem 0.35rem', border:'1px solid #E8DFD0', borderRadius:6 }} />
+                            g/dzień
+                            <button type="button" onClick={saveGrams} disabled={busy} style={linkBtn('#1b5c3a')}>Zapisz</button>
+                            <button type="button" onClick={() => setEditing(null)} style={linkBtn('#9ca3af')}>Anuluj</button>
+                          </span>
+                        ) : (
+                          <>
+                            {daily} g/dzień · {fmtGrams(it.quantity_g || 0)} na dostawę{' '}
+                            <button type="button" disabled={busy} onClick={() => setEditing({ id: it.id, value: String(daily) })} style={linkBtn('#1b5c3a')}>
+                              zmień porcję
+                            </button>
+                          </>
+                        )}
+                      </span>
+                    </span>
+                    {pet && (
+                      <button type="button" disabled={busy} onClick={() => setPicker({ mode:'swap', item: it, pet })}
+                        style={{ padding:'0.3rem 0.75rem', borderRadius:'0.5rem', border:'1px solid #E8DFD0', background:'white', fontSize:'0.8rem', cursor:'pointer', color:'#374151' }}>
+                        Zamień
+                      </button>
+                    )}
+                    <button type="button" disabled={busy} onClick={() => removeItem(it, items)} aria-label="Usuń karmę" title="Usuń karmę"
+                      style={{ background:'none', border:'none', color:'#9ca3af', cursor:'pointer', fontSize:'1rem', padding:'0 0.25rem' }}>
+                      ✕
+                    </button>
+                  </div>
+                )
+              })}
+              {pet && items.length < maxFoods && (
+                <button type="button" disabled={busy} onClick={() => setPicker({ mode:'add', pet, items })}
+                  style={{ ...linkBtn('#1b5c3a'), marginLeft:'2rem', marginTop:'0.25rem', fontSize:'0.85rem' }}>
+                  + Dodaj karmę dla {pet.name} ({items.length}/{maxFoods})
+                </button>
+              )}
+              {pet && items.length >= maxFoods && box.plan_type !== 'premium' && (
+                <p style={{ margin:'0.25rem 0 0 2rem', fontSize:'0.75rem', color:'#9ca3af' }}>
+                  Plan {PLAN_NAME[box.plan_type]} pozwala na {maxFoods} {maxFoods === 1 ? 'karmę' : 'karmy'} na pupila.
+                </p>
+              )}
             </div>
           ))}
           <Link to="/quiz" style={{ display:'inline-block', marginTop:'0.75rem', fontSize:'0.85rem', color:'#1b5c3a' }}>
@@ -291,6 +401,29 @@ export default function SubscriptionPage({ session }: { session: Session }) {
           </button>
         </div>
       </div>
+
+      {picker && (
+        <FoodPicker
+          pet={picker.pet}
+          title={picker.mode === 'swap'
+            ? `Zamień: ${picker.item.products?.nazwa ?? 'karmę'}`
+            : `Dodaj karmę dla ${picker.pet.name}`}
+          excludeIds={box.subscription_items
+            .filter(i => i.pet_id === picker.pet.id && i.products)
+            .map(i => i.products!.id)}
+          onClose={() => setPicker(null)}
+          onPick={p => {
+            const current = picker
+            setPicker(null)
+            if (current.mode === 'swap') swapItem(current.item, p)
+            else addItem(current.pet, current.items, p)
+          }}
+        />
+      )}
     </div>
   )
+}
+
+function linkBtn(color: string): React.CSSProperties {
+  return { background:'none', border:'none', padding:0, color, textDecoration:'underline', cursor:'pointer', fontSize:'0.75rem' }
 }

@@ -18,6 +18,9 @@ const KEY = 'pendingOrder'
 
 export const PLAN_RANK = { starter: 0, comfort: 1, premium: 2 } as const
 
+// Ile różnych karm na jednego pupila pozwala plan
+export const PLAN_MAX_FOODS = { starter: 1, comfort: 2, premium: 4 } as const
+
 export function savePendingOrder(order: PendingOrder) {
   sessionStorage.setItem(KEY, JSON.stringify(order))
 }

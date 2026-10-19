@@ -13,6 +13,7 @@ export interface Product {
   is_grain_free: boolean
   proteins: string[]
   meat_percent: number | null
+  opis?: string | null
 }
 
 export interface Pet {

@@ -164,7 +164,7 @@ export default function Dashboard({ session }: { session: Session }) {
                     {/* Akcje */}
                     <Link to="/subscription"
                       style={{ padding:'0.45rem 1rem', borderRadius:'0.5rem', border:'1px solid #E8DFD0', background:'white', fontSize:'0.8rem', color:'#374151', textDecoration:'none', flexShrink:0 }}>
-                      Zarządzaj →
+                      Zmień karmy / zarządzaj →
                     </Link>
                   </div>
                 </div>
@@ -202,7 +202,7 @@ export default function Dashboard({ session }: { session: Session }) {
                         </div>
                       </div>
                       {inBox ? (
-                        <Link to={`/quiz?pet=${pet.id}`} title="Zmień zestaw" style={{ fontSize:'0.7rem', padding:'2px 7px', borderRadius:20, background:'#d9ede2', color:'#1b5c3a', textDecoration:'none' }}>
+                        <Link to="/subscription" title="Zmień karmy" style={{ fontSize:'0.7rem', padding:'2px 7px', borderRadius:20, background:'#d9ede2', color:'#1b5c3a', textDecoration:'none' }}>
                           w boxie
                         </Link>
                       ) : (
@@ -237,7 +237,7 @@ export default function Dashboard({ session }: { session: Session }) {
                 <span style={{ fontSize:'1.25rem' }}>📦</span>
                 <div>
                   <div style={{ fontWeight:600, fontSize:'0.875rem' }}>Zarządzaj dostawą</div>
-                  <div style={{ fontSize:'0.75rem', color:'#6b7280' }}>Zmień karmy lub częstotliwość</div>
+                  <div style={{ fontSize:'0.75rem', color:'#6b7280' }}>Zmień karmy, porcje lub częstotliwość</div>
                 </div>
               </Link>
               <Link to="/pets" style={{ display:'flex', alignItems:'center', gap:'0.75rem', padding:'0.75rem', borderRadius:'0.75rem', background:'#faf6ef', textDecoration:'none', color:'#374151' }}>

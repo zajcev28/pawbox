@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { PetProfile, ScoredProduct } from '../types'
-import { getRecommendations, calculateDailyCalories } from '../lib/recommender'
+import { getRecommendations, calculateDailyCalories, gramsForKcal, parseKcal } from '../lib/recommender'
 import { useAIRecommendations } from '../hooks/useAIRecommendations'
 import { useProducts } from '../hooks/useProducts'
 import { supabase } from '../lib/supabase'
-import { savePendingOrder } from '../lib/order'
+import { savePendingOrder, PLAN_MAX_FOODS } from '../lib/order'
 
 // ─── Typy ────────────────────────────────────────────────────────────────────
 interface BoxItem {
@@ -30,13 +30,13 @@ interface Plan {
 const PLANS: Plan[] = [
   { id: 'starter', name: 'Podstawowy', emoji: '🌱',
     features: ['1 rodzaj karmy', 'Dostawa co 30 dni', '1 pupil'],
-    discount: 0, maxFoods: 1, featured: false },
+    discount: 0, maxFoods: PLAN_MAX_FOODS.starter, featured: false },
   { id: 'comfort', name: 'Komfortowy', emoji: '⭐',
     features: ['Do 2 rodzajów karm', 'Dostawa co 14–30 dni', 'Do 2 pupili', 'Rabat 5%', 'Darmowa dostawa od 120 PLN'],
-    discount: 5, maxFoods: 2, featured: true },
+    discount: 5, maxFoods: PLAN_MAX_FOODS.comfort, featured: true },
   { id: 'premium', name: 'Premium', emoji: '💎',
     features: ['Do 4 rodzajów karm', 'Dowolna częstotliwość', 'Nieograniczone pupile', 'Rabat 10%', 'Zawsze darmowa dostawa'],
-    discount: 10, maxFoods: 4, featured: false },
+    discount: 10, maxFoods: PLAN_MAX_FOODS.premium, featured: false },
 ]
 
 const PERIODS = [
@@ -51,30 +51,8 @@ const PROTEIN_LABELS: Record<string, string> = {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function parseKcal(energia: string | null, foodType: 'dry' | 'wet'): number {
-  if (energia) {
-    const s = energia.toLowerCase()
-    const m = energia.match(/(\d+)/)
-    if (m) {
-      const v = parseInt(m[1])
-      // Jeśli wartość to kcal/kg — przelicz na kcal/100g
-      if (s.includes('/kg') || s.includes('kg')) return Math.round(v / 10)
-      // Jeśli wartość to kcal/100g — użyj bezpośrednio
-      if (s.includes('100g') || s.includes('100 g')) return v
-      // Heurystyka: >800 to prawie na pewno kcal/kg
-      if (v > 800) return Math.round(v / 10)
-      return v
-    }
-  }
-  return foodType === 'dry' ? 350 : 85
-}
-
 function buildBoxItem(product: ScoredProduct, dailyCal: number, days: number): BoxItem {
-  const kcalPer100g = parseKcal(product.energia, product.food_type)
-  const rawGrams = Math.round((dailyCal / kcalPer100g) * 100)
-  // Sanity check: kot max ~400g/dzień, pies max ~1500g/dzień
-  const maxGrams = 1500
-  const grams_per_day = Math.min(rawGrams, maxGrams)
+  const grams_per_day = gramsForKcal(dailyCal, product.energia, product.food_type)
   const grams_total = grams_per_day * days
   const packGrams = product.food_type === 'wet' ? 400 : 2000
   const bags = Math.ceil(grams_total / packGrams)
